@@ -1,9 +1,18 @@
 import anthropic
+import openai
 
 from config import settings
 from db.models import Job, JobCategory
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+if settings.deepseek_api_key:
+    client = openai.OpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url="https://api.deepseek.com",
+    )
+    _use_deepseek = True
+else:
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    _use_deepseek = False
 
 SYSTEM_PROMPT = """あなたはAI総合商社の制作担当AIです。
 クライアントから依頼された案件を高品質に仕上げます。
@@ -102,17 +111,27 @@ async def execute_job(job: Job) -> str:
         description=job.description or "",
     )
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return response.content[0].text
+    if _use_deepseek:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            max_tokens=4096,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return response.choices[0].message.content
+    else:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text

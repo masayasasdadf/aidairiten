@@ -2,12 +2,21 @@ import json
 from typing import Optional
 
 import anthropic
+import openai
 
 from config import settings
 from db.models import JobCategory, ExecutionType
 from scrapers.base import RawJob
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+if settings.deepseek_api_key:
+    client = openai.OpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url="https://api.deepseek.com",
+    )
+    _use_deepseek = True
+else:
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    _use_deepseek = False
 
 SYSTEM_PROMPT = """あなたはAI総合商社の案件分析担当AIです。
 クラウドソーシングプラットフォームから取得した案件を分析し、受注すべきかどうか判断します。
@@ -76,20 +85,30 @@ async def analyze_job(job: RawJob) -> dict:
         platform=job.platform,
     )
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text = response.content[0].text.strip()
+    if _use_deepseek:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            max_tokens=512,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        text = response.choices[0].message.content.strip()
+    else:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
     try:
         result = json.loads(text)
     except json.JSONDecodeError:

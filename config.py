@@ -3,7 +3,8 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    anthropic_api_key: str = Field(..., env="ANTHROPIC_API_KEY")
+    anthropic_api_key: str = Field("", env="ANTHROPIC_API_KEY")
+    deepseek_api_key: str = Field("", env="DEEPSEEK_API_KEY")
 
     crowdworks_email: str = Field("", env="CROWDWORKS_EMAIL")
     crowdworks_password: str = Field("", env="CROWDWORKS_PASSWORD")
