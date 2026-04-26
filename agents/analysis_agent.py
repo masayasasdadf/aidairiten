@@ -1,13 +1,12 @@
 import json
-from typing import Optional
 
-import anthropic
+from openai import OpenAI
 
 from config import settings
 from db.models import JobCategory, ExecutionType
 from scrapers.base import RawJob
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 SYSTEM_PROMPT = """あなたはAI総合商社の案件分析担当AIです。
 クラウドソーシングプラットフォームから取得した案件を分析し、受注すべきかどうか判断します。
@@ -76,20 +75,17 @@ async def analyze_job(job: RawJob) -> dict:
         platform=job.platform,
     )
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+    response = client.chat.completions.create(
+        model="deepseek-chat",
         max_tokens=512,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
         ],
-        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
     )
 
-    text = response.content[0].text.strip()
+    text = (response.choices[0].message.content or "").strip()
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
