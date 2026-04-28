@@ -6,6 +6,7 @@
 
 import asyncio
 import argparse
+import os
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -44,14 +45,15 @@ async def main():
 
     # ダッシュボード起動
     from dashboard.app import app
+    port = int(os.environ.get("PORT", settings.dashboard_port))
     config = uvicorn.Config(
         app,
         host=settings.dashboard_host,
-        port=settings.dashboard_port,
+        port=port,
         log_level="warning",
     )
     server = uvicorn.Server(config)
-    print(f"ダッシュボード起動: http://localhost:{settings.dashboard_port}")
+    print(f"ダッシュボード起動: http://localhost:{port}")
     await server.serve()
 
 
