@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: aidairiten
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: CROWDWORKS_EMAIL
+        sync: false
+      - key: CROWDWORKS_PASSWORD
+        sync: false
+      - key: LANCERS_EMAIL
+        sync: false
+      - key: LANCERS_PASSWORD
+        sync: false
+      - key: COCONALA_EMAIL
+        sync: false
+      - key: COCONALA_PASSWORD
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"

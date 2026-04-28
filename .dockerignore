@@ -1,0 +1,17 @@
+.git
+.gitignore
+.devcontainer
+.env
+.env.example
+*.db
+*.db-shm
+*.db-wal
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+.vscode
+.idea
+README.md

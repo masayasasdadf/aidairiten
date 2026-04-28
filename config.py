@@ -3,7 +3,10 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    anthropic_api_key: str = Field(..., env="ANTHROPIC_API_KEY")
+    deepseek_api_key: str = Field(..., env="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field("https://api.deepseek.com", env="DEEPSEEK_BASE_URL")
+
+    database_url: str = Field("sqlite:///./aidairiten.db", env="DATABASE_URL")
 
     crowdworks_email: str = Field("", env="CROWDWORKS_EMAIL")
     crowdworks_password: str = Field("", env="CROWDWORKS_PASSWORD")

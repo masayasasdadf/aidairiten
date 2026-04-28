@@ -1,9 +1,9 @@
-import anthropic
+from openai import OpenAI
 
 from config import settings
 from db.models import Job, JobCategory
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 SYSTEM_PROMPT = """あなたはAI総合商社の制作担当AIです。
 クライアントから依頼された案件を高品質に仕上げます。
@@ -102,17 +102,13 @@ async def execute_job(job: Job) -> str:
         description=job.description or "",
     )
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    response = client.chat.completions.create(
+        model="deepseek-chat",
         max_tokens=4096,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
         ],
-        messages=[{"role": "user", "content": prompt}],
     )
 
-    return response.content[0].text
+    return response.choices[0].message.content or ""
