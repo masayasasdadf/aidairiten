@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Float, Boolean, Enum as SAEnum
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, Boolean, ForeignKey, Enum as SAEnum
 from sqlalchemy.orm import relationship
 import enum
 
@@ -65,7 +65,7 @@ class Deliverable(Base):
     __tablename__ = "deliverables"
 
     id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, nullable=False)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
     content = Column(Text)
     qc_passed = Column(Boolean, nullable=True)
     qc_notes = Column(Text)
@@ -73,5 +73,4 @@ class Deliverable(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    job = relationship("Job", back_populates="deliverable", foreign_keys=[job_id],
-                       primaryjoin="Deliverable.job_id == Job.id")
+    job = relationship("Job", back_populates="deliverable")

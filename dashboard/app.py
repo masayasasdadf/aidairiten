@@ -3,10 +3,15 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 
-from db.database import get_db
+from db.database import get_db, init_db
 from db.models import Job, Deliverable, JobStatus
 
 app = FastAPI(title="AI総合商社 ダッシュボード")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    init_db()
 
 
 @app.get("/", response_class=HTMLResponse)
