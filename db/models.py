@@ -19,7 +19,8 @@ class JobCategory(str, enum.Enum):
 class JobStatus(str, enum.Enum):
     NEW = "new"                  # 新着・未処理
     ANALYZING = "analyzing"      # 分析中
-    INHOUSE = "inhouse"          # 自社AI処理予定
+    REPORTED = "reported"        # 営業部上申中（ユーザーのGO待ち）
+    INHOUSE = "inhouse"          # 自社AI処理予定（GO後）
     OUTSOURCE = "outsource"      # 外注予定（発注先待ち）
     SKIPPED = "skipped"          # スキップ
     IN_PROGRESS = "in_progress"  # 生産中

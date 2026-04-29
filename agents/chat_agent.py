@@ -124,9 +124,22 @@ def _tools_for(thread: str) -> list[dict]:
         },
     }
 
+    cycle_tool = {
+        "type": "function",
+        "function": {
+            "name": "start_scrape_cycle",
+            "description": (
+                "営業部の巡回（スクレイピング → 分析 → 上申）を1サイクル走らせる。"
+                "巡回はバックグラウンドで非同期に実行され、結果は活動ログと案件一覧で確認できる。"
+                "既に巡回中なら何もせず通知する。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
     if thread == "ceo":
-        return [pause_tool, resume_tool, add_directive_tool, release_directive_tool]
-    # 部門マネージャは自部署への指示のみ。pause/resume は不可
+        return [pause_tool, resume_tool, cycle_tool, add_directive_tool, release_directive_tool]
+    # 部門マネージャは自部署への指示のみ。pause/resume/巡回 は不可
     return [add_directive_tool]
 
 
@@ -173,6 +186,18 @@ def _exec_tool(name: str, args: dict, thread: str) -> dict:
             return {"ok": True, "directive_id": d.id}
         finally:
             db.close()
+
+    if name == "start_scrape_cycle":
+        # 循環 import を避けるためここで遅延 import
+        import asyncio as _asyncio
+        from pipeline import run_pipeline, cycle_state as _cycle_state
+
+        st = _cycle_state()
+        if st["running"]:
+            return {"ok": False, "error": "既に巡回中", "phase": st["phase"]}
+        log_event("system", "巡回開始指示", "chat経由", level="success")
+        _asyncio.create_task(run_pipeline())
+        return {"ok": True, "started": True}
 
     if name == "release_directive":
         did = int(args.get("directive_id", 0))

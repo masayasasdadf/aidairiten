@@ -6,11 +6,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 
+import asyncio
+
 from agents.chat_agent import chat as chat_agent_run, fetch_history, PERSONAS as CHAT_THREADS
 from db.control import get_state as get_control_state, pause as pause_ops, resume as resume_ops
 from db.database import get_db, init_db
 from db.models import Job, Deliverable, Directive, JobStatus
 from dashboard.events import get_events, log_event
+from pipeline import run_pipeline, go_job, skip_job, cycle_state
 
 
 _VALID_TARGETS = {"all", "analysis", "execution", "qc"}
@@ -168,7 +171,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>AI総合商社 ダッシュボード</h1>
-  <div class="clock" id="clock">--:--:--</div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button id="cycle-btn" onclick="startCycle()" style="background:#7c8cf8;border:none;color:white;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:600">🔍 巡回開始</button>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
 </header>
 
 <div class="stats" id="stats">読み込み中...</div>
@@ -236,8 +242,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 const STATUS_LABELS = {
   new: ['新着', 'badge-new'], analyzing: ['分析中', 'badge-new'],
-  inhouse: ['自社処理予定', 'badge-inhouse'], outsource: ['外注予定', 'badge-outsource'],
-  skipped: ['スキップ', 'badge-skip'], in_progress: ['生産中', 'badge-inhouse'],
+  reported: ['🔔 上申(GO待ち)', 'badge-qc'],
+  inhouse: ['制作キュー', 'badge-inhouse'], outsource: ['外注待ち', 'badge-outsource'],
+  skipped: ['見送り', 'badge-skip'], in_progress: ['生産中', 'badge-inhouse'],
   qc: ['QC中', 'badge-qc'], pending_approval: ['承認待ち', 'badge-qc'],
   approved: ['承認済み', 'badge-approved'], delivered: ['納品済み', 'badge-approved'],
   rejected: ['NG', 'badge-skip'],
@@ -334,10 +341,15 @@ async function loadJobs() {
       const [label, cls] = STATUS_LABELS[j.status] || [j.status, 'badge-new'];
       const price = j.price_fixed ? `¥${j.price_fixed.toLocaleString()}` :
         j.price_min ? `¥${j.price_min.toLocaleString()}〜` : '不明';
-      const actions = j.status === 'pending_approval'
-        ? `<button class="btn btn-approve" onclick="approve(${j.id})">承認</button>
-           <button class="btn btn-reject" onclick="reject(${j.id})">却下</button>`
-        : '';
+      let actions = '';
+      if (j.status === 'reported') {
+        const goLabel = j.execution_type === 'outsource' ? 'GO(外注)' : 'GO(受注)';
+        actions = `<button class="btn btn-approve" onclick="goJob(${j.id})">${goLabel}</button>
+                   <button class="btn btn-reject" onclick="skipJob(${j.id})">見送る</button>`;
+      } else if (j.status === 'pending_approval') {
+        actions = `<button class="btn btn-approve" onclick="approve(${j.id})">承認</button>
+                   <button class="btn btn-reject" onclick="reject(${j.id})">却下</button>`;
+      }
       return `<tr>
         <td><a href="${j.url}" target="_blank">${escapeHtml(j.title.slice(0,40))}${j.title.length>40?'…':''}</a></td>
         <td>${j.platform}</td>
@@ -359,6 +371,39 @@ function escapeHtml(s) {
 
 async function approve(id) { await fetch(`/api/jobs/${id}/approve`, {method:'POST'}); refreshAll(); }
 async function reject(id)  { await fetch(`/api/jobs/${id}/reject`,  {method:'POST'}); refreshAll(); }
+async function goJob(id)   { await fetch(`/api/jobs/${id}/go`,      {method:'POST'}); refreshAll(); }
+async function skipJob(id) { await fetch(`/api/jobs/${id}/skip`,    {method:'POST'}); refreshAll(); }
+
+async function startCycle() {
+  const btn = document.getElementById('cycle-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/cycle/run', { method: 'POST' });
+    if (r.status === 409) { alert('既に巡回中です'); }
+    else if (!r.ok) { alert('巡回開始失敗: ' + r.status); }
+    loadActivity();
+    pollCycleState();
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 1500);
+  }
+}
+
+async function pollCycleState() {
+  try {
+    const r = await fetch('/api/cycle/state');
+    const s = await r.json();
+    const btn = document.getElementById('cycle-btn');
+    if (s.running) {
+      btn.textContent = `🌀 巡回中… (${s.phase || '...'})`;
+      btn.disabled = true;
+      setTimeout(pollCycleState, 2000);
+    } else {
+      btn.textContent = '🔍 巡回開始';
+      btn.disabled = false;
+      refreshAll();
+    }
+  } catch (e) { console.warn('cycle state', e); }
+}
 
 async function loadDirectives() {
   try {
@@ -514,6 +559,7 @@ setupChatTabs();
 // 初回 + ポーリング
 refreshAll();
 loadChat();
+pollCycleState();
 setInterval(loadActivity, 3000);          // 活動ログは速めに
 setInterval(() => { loadStats(); loadJobs(); loadDirectives(); loadControl(); }, 15000);
 setInterval(() => { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }, 1000);
@@ -525,20 +571,19 @@ setInterval(() => { document.getElementById('clock').textContent = new Date().to
 @app.get("/api/stats")
 async def get_stats(db: Session = Depends(get_db)):
     total = db.query(Job).count()
-    new = db.query(Job).filter(Job.status == JobStatus.NEW).count()
-    inhouse = db.query(Job).filter(Job.status == JobStatus.INHOUSE).count()
+    reported = db.query(Job).filter(Job.status == JobStatus.REPORTED).count()
     in_progress = db.query(Job).filter(Job.status == JobStatus.IN_PROGRESS).count()
+    qc = db.query(Job).filter(Job.status == JobStatus.QC).count()
     pending = db.query(Job).filter(Job.status == JobStatus.PENDING_APPROVAL).count()
     approved = db.query(Job).filter(Job.status == JobStatus.APPROVED).count()
-    delivered = db.query(Job).filter(Job.status == JobStatus.DELIVERED).count()
+    skipped = db.query(Job).filter(Job.status == JobStatus.SKIPPED).count()
     return {
         "総案件数": total,
-        "新着": new,
-        "自社処理予定": inhouse,
-        "生産中": in_progress,
+        "上申待ち(GO待ち)": reported,
+        "生産中": in_progress + qc,
         "承認待ち": pending,
         "承認済み": approved,
-        "納品済み": delivered,
+        "見送り": skipped,
     }
 
 
@@ -633,6 +678,35 @@ async def post_resume():
     resume_ops()
     log_event("system", "業務再開", "UI操作", level="success")
     return {"ok": True}
+
+
+@app.get("/api/cycle/state")
+async def get_cycle():
+    return cycle_state()
+
+
+@app.post("/api/cycle/run")
+async def post_cycle_run():
+    state = cycle_state()
+    if state["running"]:
+        raise HTTPException(status_code=409, detail="既に巡回中")
+    log_event("system", "巡回開始指示", "UIから手動トリガ", level="success")
+    asyncio.create_task(run_pipeline())
+    return {"ok": True, "started": True}
+
+
+@app.post("/api/jobs/{job_id}/go")
+async def post_job_go(job_id: int):
+    state = cycle_state()
+    # GO は内部で execute → QC まで走らせるので、巡回と並行しても基本問題ないが
+    # ロックは軽くしておく（巡回サイクルは別ロック）
+    asyncio.create_task(go_job(job_id))
+    return {"ok": True, "scheduled": True}
+
+
+@app.post("/api/jobs/{job_id}/skip")
+async def post_job_skip(job_id: int):
+    return skip_job(job_id)
 
 
 @app.get("/api/chat/{thread}")

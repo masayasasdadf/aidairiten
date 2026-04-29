@@ -1,36 +1,23 @@
 """
 使い方:
-  python main.py          # ダッシュボード起動 + スケジューラ
-  python main.py --once   # パイプラインを1回だけ実行して終了
+  python main.py          # ダッシュボード起動。巡回はUIから手動トリガ
+  python main.py --once   # 巡回を1回だけ実行して終了（CLI用途）
 """
 
 import asyncio
 import argparse
 import os
-import uvicorn
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from db.database import init_db
+import uvicorn
+
 from config import settings
+from db.database import init_db
 from pipeline import run_pipeline
 
 
-def start_scheduler():
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        run_pipeline,
-        trigger="interval",
-        minutes=settings.monitor_interval_minutes,
-        id="pipeline",
-        replace_existing=True,
-    )
-    scheduler.start()
-    return scheduler
-
-
-async def main():
+async def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="パイプラインを1回だけ実行")
+    parser.add_argument("--once", action="store_true", help="巡回を1回だけ実行して終了")
     args = parser.parse_args()
 
     init_db()
@@ -39,21 +26,12 @@ async def main():
         await run_pipeline()
         return
 
-    # スケジューラ起動（初回すぐ実行）
-    scheduler = start_scheduler()
-    asyncio.get_event_loop().call_soon(lambda: asyncio.ensure_future(run_pipeline()))
-
-    # ダッシュボード起動
     from dashboard.app import app
+
     port = int(os.environ.get("PORT", settings.dashboard_port))
-    config = uvicorn.Config(
-        app,
-        host=settings.dashboard_host,
-        port=port,
-        log_level="warning",
-    )
+    config = uvicorn.Config(app, host=settings.dashboard_host, port=port, log_level="warning")
     server = uvicorn.Server(config)
-    print(f"ダッシュボード起動: http://localhost:{port}")
+    print(f"ダッシュボード起動: http://{settings.dashboard_host}:{port}（巡回はUIから手動トリガ）")
     await server.serve()
 
 
