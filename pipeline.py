@@ -143,6 +143,18 @@ async def _execute(db: Session, job: Job):
 
 
 async def run_pipeline():
+    from db.control import is_paused
+
+    paused, until, reason = is_paused()
+    if paused:
+        log_event(
+            "pipeline",
+            "業務停止中につきスキップ",
+            f"再開予定 {until.strftime('%Y-%m-%d %H:%M UTC')} / 理由: {reason or '-'}",
+            level="warn",
+        )
+        return
+
     log_event("pipeline", "起動", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     # 1. 案件収集

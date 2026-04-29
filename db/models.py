@@ -78,6 +78,35 @@ class Directive(Base):
     deactivated_at = Column(DateTime, nullable=True)
 
 
+class ChatMessage(Base):
+    """部門との会話履歴。thread ∈ {'ceo','analysis','execution','qc'}"""
+
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    thread = Column(String(20), nullable=False, index=True)
+    role = Column(String(20), nullable=False)        # 'user' / 'assistant' / 'tool'
+    content = Column(Text, nullable=False, default="")
+    tool_name = Column(String(50), nullable=True)    # tool 結果メッセージの場合
+    tool_args = Column(Text, nullable=True)          # JSON 文字列
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SystemControl(Base):
+    """シングルトン (id=1): 業務全体の制御フラグ。
+
+    pipeline 起動時に paused_until をチェックし、
+    今が past なら通常稼働、future なら今回のサイクルをスキップ。
+    """
+
+    __tablename__ = "system_control"
+
+    id = Column(Integer, primary_key=True, default=1)
+    paused_until = Column(DateTime, nullable=True)
+    pause_reason = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Deliverable(Base):
     __tablename__ = "deliverables"
 

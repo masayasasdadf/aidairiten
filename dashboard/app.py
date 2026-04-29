@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from agents.chat_agent import chat as chat_agent_run, fetch_history, PERSONAS as CHAT_THREADS
+from db.control import get_state as get_control_state, pause as pause_ops, resume as resume_ops
 from db.database import get_db, init_db
 from db.models import Job, Deliverable, Directive, JobStatus
 from dashboard.events import get_events, log_event
@@ -17,6 +19,10 @@ _VALID_TARGETS = {"all", "analysis", "execution", "qc"}
 class DirectiveIn(BaseModel):
     target: str = Field(..., description="all / analysis / execution / qc")
     instruction: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatIn(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
 
 app = FastAPI(title="AI総合商社 ダッシュボード")
 
@@ -128,6 +134,35 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .god-item .release { background: transparent; border: 1px solid #5a3d5e; color: #c084fc; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.72rem; }
   .god-item .release:hover { background: #5a3d5e33; }
   .god-empty { color: #666; font-size: 0.82rem; padding: 6px 0; }
+
+  /* 業務状態バナー */
+  .control-banner { margin: 0 24px 12px; padding: 10px 16px; border-radius: 8px; display: flex; gap: 12px; align-items: center; font-size: 0.9rem; }
+  .control-banner.paused { background: #3a1d1d; border: 1px solid #7f1d1d; color: #fca5a5; }
+  .control-banner.active { background: #1a2a1d; border: 1px solid #166534; color: #86efac; }
+  .control-banner button { background: transparent; border: 1px solid currentColor; color: inherit; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; margin-left: auto; }
+  .control-banner button:hover { background: rgba(255,255,255,0.05); }
+
+  /* チャット */
+  .chat-section { padding: 0 24px 24px; }
+  .chat-panel { background: #1a1d2e; border: 1px solid #2a2d3e; border-radius: 10px; overflow: hidden; }
+  .chat-panel h3 { font-size: 0.85rem; color: #aaa; padding: 10px 14px; background: #15182a; border-bottom: 1px solid #2a2d3e; letter-spacing: 0.05em; display:flex; align-items:center; gap:8px; }
+  .chat-tabs { display: flex; background: #0f1117; border-bottom: 1px solid #2a2d3e; }
+  .chat-tabs .tab { background: transparent; color: #888; border: none; padding: 10px 18px; cursor: pointer; font-size: 0.85rem; font-family: inherit; border-bottom: 2px solid transparent; }
+  .chat-tabs .tab:hover { color: #ccc; }
+  .chat-tabs .tab.active { color: #7c8cf8; border-bottom-color: #7c8cf8; background: #1a1d2e; }
+  .chat-history { height: 360px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background: #15182a; }
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 10px; font-size: 0.88rem; line-height: 1.5; word-break: break-word; white-space: pre-wrap; }
+  .msg.user { background: #2a3a5e; color: #e0e7ff; align-self: flex-end; border-bottom-right-radius: 2px; }
+  .msg.assistant { background: #2a2d3e; color: #ddd; align-self: flex-start; border-bottom-left-radius: 2px; }
+  .msg.tool { background: #3a2a1d; color: #fde68a; align-self: stretch; font-family: ui-monospace, monospace; font-size: 0.75rem; }
+  .msg .meta { font-size: 0.7rem; color: #888; margin-top: 4px; }
+  .chat-form { display: flex; gap: 8px; padding: 12px; background: #1a1d2e; border-top: 1px solid #2a2d3e; }
+  .chat-form input { flex: 1; background: #0f1117; color: #e0e0e0; border: 1px solid #3a3d5e; border-radius: 6px; padding: 9px 12px; font-size: 0.88rem; font-family: inherit; }
+  .chat-form button { background: #7c8cf8; border: none; color: white; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 0.88rem; font-weight: 600; }
+  .chat-form button:hover { background: #6373d8; }
+  .chat-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .chat-empty { color: #555; text-align: center; padding: 40px 0; font-size: 0.85rem; }
+  .typing { color: #666; font-size: 0.8rem; font-style: italic; }
 </style>
 </head>
 <body>
@@ -137,6 +172,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 
 <div class="stats" id="stats">読み込み中...</div>
+
+<div class="control-banner active" id="control-banner" style="display:none">
+  <span id="control-text"></span>
+  <button onclick="resumeOps()" id="control-resume" style="display:none">即時再開</button>
+</div>
 
 <div class="god-section">
   <div class="god-panel">
@@ -157,6 +197,23 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
 <h2 style="padding: 0 24px;">AI部門の稼働状況</h2>
 <div class="depts" id="depts"></div>
+
+<div class="chat-section">
+  <div class="chat-panel">
+    <h3>💬 部門との対話 <span style="color:#666;font-weight:400;font-size:0.75rem;margin-left:auto">統括は業務停止/再開などの実コマンドを実行できる</span></h3>
+    <div class="chat-tabs" id="chat-tabs">
+      <button type="button" class="tab active" data-thread="ceo">統括(COO)</button>
+      <button type="button" class="tab" data-thread="analysis">分析部</button>
+      <button type="button" class="tab" data-thread="execution">制作部</button>
+      <button type="button" class="tab" data-thread="qc">QC部</button>
+    </div>
+    <div class="chat-history" id="chat-history"></div>
+    <form class="chat-form" id="chat-form" onsubmit="return submitChat(event)">
+      <input id="chat-input" type="text" placeholder="メッセージを送る…（例: 24時間業務停止しろ / 文体を関西弁に）" maxlength="4000" autocomplete="off" required />
+      <button type="submit" id="chat-submit">送信</button>
+    </form>
+  </div>
+</div>
 
 <div class="grid2">
   <div class="panel">
@@ -353,12 +410,112 @@ async function releaseDirective(id) {
   loadActivity();
 }
 
-function refreshAll() { loadStats(); loadJobs(); loadActivity(); loadDirectives(); }
+function refreshAll() { loadStats(); loadJobs(); loadActivity(); loadDirectives(); loadControl(); }
+
+async function loadControl() {
+  try {
+    const r = await fetch('/api/control');
+    const s = await r.json();
+    const banner = document.getElementById('control-banner');
+    const text = document.getElementById('control-text');
+    const btn = document.getElementById('control-resume');
+    if (s.paused) {
+      banner.className = 'control-banner paused';
+      banner.style.display = 'flex';
+      btn.style.display = 'inline-block';
+      const until = s.paused_until ? new Date(s.paused_until).toLocaleString('ja-JP') : '?';
+      text.textContent = `🛑 業務停止中（再開予定: ${until}） — ${s.pause_reason || ''}`;
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (e) { console.warn('control failed', e); }
+}
+
+async function resumeOps() {
+  if (!confirm('業務を即時再開する？')) return;
+  await fetch('/api/control/resume', { method: 'POST' });
+  loadControl(); loadActivity();
+}
+
+// ---- チャット ----
+let currentThread = 'ceo';
+
+function setupChatTabs() {
+  document.querySelectorAll('#chat-tabs .tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('#chat-tabs .tab').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      currentThread = t.dataset.thread;
+      loadChat();
+    });
+  });
+}
+
+async function loadChat() {
+  try {
+    const r = await fetch(`/api/chat/${currentThread}`);
+    const items = await r.json();
+    const el = document.getElementById('chat-history');
+    if (!items.length) {
+      el.innerHTML = '<div class="chat-empty">まだ会話はありません。気軽に話しかけてみてください。</div>';
+      return;
+    }
+    el.innerHTML = items.filter(m => m.role !== 'tool').map(m => `
+      <div class="msg ${m.role}">${escapeHtml(m.content)}</div>
+    `).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch (e) { console.warn('chat history failed', e); }
+}
+
+async function submitChat(ev) {
+  ev.preventDefault();
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('chat-submit');
+  const text = input.value.trim();
+  if (!text) return false;
+  input.value = '';
+  btn.disabled = true;
+
+  // 楽観的に user message を即表示 + typing インジケータ
+  const el = document.getElementById('chat-history');
+  if (el.querySelector('.chat-empty')) el.innerHTML = '';
+  el.insertAdjacentHTML('beforeend', `<div class="msg user">${escapeHtml(text)}</div>`);
+  el.insertAdjacentHTML('beforeend', `<div class="msg assistant typing" id="typing-indicator">考え中…</div>`);
+  el.scrollTop = el.scrollHeight;
+
+  try {
+    const r = await fetch(`/api/chat/${currentThread}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ message: text }),
+    });
+    document.getElementById('typing-indicator')?.remove();
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      el.insertAdjacentHTML('beforeend', `<div class="msg assistant" style="color:#f87171">エラー: ${escapeHtml(err.detail || r.status)}</div>`);
+    } else {
+      const data = await r.json();
+      el.insertAdjacentHTML('beforeend', `<div class="msg assistant">${escapeHtml(data.reply)}</div>`);
+      if (data.tool_calls && data.tool_calls.length) {
+        // ツール実行があったので各種ステート更新
+        loadDirectives(); loadControl(); loadActivity(); loadStats();
+      }
+    }
+    el.scrollTop = el.scrollHeight;
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
+  return false;
+}
+
+setupChatTabs();
 
 // 初回 + ポーリング
 refreshAll();
+loadChat();
 setInterval(loadActivity, 3000);          // 活動ログは速めに
-setInterval(() => { loadStats(); loadJobs(); loadDirectives(); }, 15000);
+setInterval(() => { loadStats(); loadJobs(); loadDirectives(); loadControl(); }, 15000);
 setInterval(() => { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }, 1000);
 </script>
 </body>
@@ -464,6 +621,37 @@ async def deactivate_directive(directive_id: int, db: Session = Depends(get_db))
     scope = "全社" if d.target == "all" else f"{d.target}部"
     log_event("god", "神の声 解除", f"[{scope}] {d.instruction[:120]}", level="warn")
     return {"ok": True}
+
+
+@app.get("/api/control")
+async def get_control():
+    return get_control_state()
+
+
+@app.post("/api/control/resume")
+async def post_resume():
+    resume_ops()
+    log_event("system", "業務再開", "UI操作", level="success")
+    return {"ok": True}
+
+
+@app.get("/api/chat/{thread}")
+async def get_chat_history(thread: str, limit: int = 100):
+    if thread not in CHAT_THREADS:
+        raise HTTPException(status_code=404, detail=f"thread は {sorted(CHAT_THREADS)} のいずれか")
+    return fetch_history(thread, limit=limit)
+
+
+@app.post("/api/chat/{thread}")
+async def post_chat(thread: str, payload: ChatIn):
+    if thread not in CHAT_THREADS:
+        raise HTTPException(status_code=404, detail=f"thread は {sorted(CHAT_THREADS)} のいずれか")
+    try:
+        result = await chat_agent_run(thread, payload.message.strip())
+    except Exception as e:
+        log_event("chat", thread, f"エラー: {e}", level="error")
+        raise HTTPException(status_code=500, detail=str(e))
+    return result
 
 
 @app.get("/api/jobs/{job_id}/deliverable")
