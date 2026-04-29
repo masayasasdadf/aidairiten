@@ -1,5 +1,6 @@
 import asyncio
 
+from dashboard.events import log_event
 from scrapers.base import RawJob
 from scrapers.crowdworks import CrowdworksScraper
 from scrapers.lancers import LancersScraper
@@ -19,9 +20,9 @@ async def run_all_scrapers() -> list[RawJob]:
     jobs = []
     for scraper_cls, result in zip(ALL_SCRAPERS, results):
         if isinstance(result, Exception):
-            print(f"[Monitor] {scraper_cls.platform_name} failed: {result}")
+            log_event("scraper", scraper_cls.platform_name, f"失敗: {result}", level="error")
         else:
-            print(f"[Monitor] {scraper_cls.platform_name}: {len(result)} jobs found")
+            log_event("scraper", scraper_cls.platform_name, f"{len(result)} 件取得")
             jobs.extend(result)
 
     return jobs

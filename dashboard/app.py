@@ -5,6 +5,7 @@ from typing import Optional
 
 from db.database import get_db, init_db
 from db.models import Job, Deliverable, JobStatus
+from dashboard.events import get_events
 
 app = FastAPI(title="AI総合商社 ダッシュボード")
 
@@ -16,7 +17,10 @@ def _startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return """<!DOCTYPE html>
+    return _DASHBOARD_HTML
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
@@ -24,116 +28,237 @@ async def dashboard():
 <title>AI総合商社 ダッシュボード</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; }
-  header { background: #1a1d2e; padding: 16px 24px; border-bottom: 1px solid #2a2d3e; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e0e0e0; }
+  header { background: #1a1d2e; padding: 16px 24px; border-bottom: 1px solid #2a2d3e; display:flex; justify-content:space-between; align-items:center; }
   header h1 { font-size: 1.4rem; color: #7c8cf8; }
-  .stats { display: flex; gap: 16px; padding: 24px; flex-wrap: wrap; }
-  .stat-card { background: #1a1d2e; border-radius: 8px; padding: 20px; min-width: 140px; border: 1px solid #2a2d3e; }
-  .stat-card .num { font-size: 2rem; font-weight: bold; color: #7c8cf8; }
-  .stat-card .label { font-size: 0.8rem; color: #888; margin-top: 4px; }
-  .section { padding: 0 24px 24px; }
-  h2 { font-size: 1rem; color: #aaa; margin-bottom: 12px; }
-  table { width: 100%; border-collapse: collapse; background: #1a1d2e; border-radius: 8px; overflow: hidden; }
-  th { background: #2a2d3e; padding: 10px 14px; text-align: left; font-size: 0.8rem; color: #888; }
-  td { padding: 10px 14px; font-size: 0.85rem; border-top: 1px solid #2a2d3e; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+  header .clock { font-family: ui-monospace, monospace; color: #888; font-size: 0.85rem; }
+
+  .stats { display: flex; gap: 12px; padding: 18px 24px; flex-wrap: wrap; }
+  .stat-card { background: #1a1d2e; border-radius: 8px; padding: 14px 18px; min-width: 110px; border: 1px solid #2a2d3e; }
+  .stat-card .num { font-size: 1.6rem; font-weight: bold; color: #7c8cf8; }
+  .stat-card .label { font-size: 0.75rem; color: #888; margin-top: 2px; }
+
+  .section { padding: 0 24px 18px; }
+  h2 { font-size: 0.9rem; color: #aaa; margin-bottom: 10px; letter-spacing: 0.05em; }
+
+  /* 部門カード */
+  .depts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; padding: 0 24px 18px; }
+  .dept { background: #1a1d2e; border: 1px solid #2a2d3e; border-radius: 10px; padding: 14px; transition: border-color 0.3s; }
+  .dept.active { border-color: #4ade80; box-shadow: 0 0 0 1px #4ade8033; }
+  .dept .head { display:flex; align-items:center; gap:8px; margin-bottom: 6px; }
+  .dept .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+  .dept.active .dot { background: #4ade80; box-shadow: 0 0 8px #4ade80; animation: pulse 1.4s ease-in-out infinite; }
+  .dept .name { font-weight: 600; font-size: 0.95rem; }
+  .dept .state { font-size: 0.75rem; color: #888; margin-left: auto; }
+  .dept.active .state { color: #4ade80; }
+  .dept .last { font-size: 0.8rem; color: #ccc; line-height: 1.5; min-height: 2.4rem; }
+  .dept .ago { font-size: 0.7rem; color: #666; margin-top: 6px; font-family: ui-monospace, monospace; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* 2カラムレイアウト */
+  .grid2 { display: grid; grid-template-columns: 1fr 1.4fr; gap: 16px; padding: 0 24px 24px; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .panel { background: #1a1d2e; border: 1px solid #2a2d3e; border-radius: 10px; overflow: hidden; }
+  .panel h3 { font-size: 0.8rem; color: #aaa; padding: 10px 14px; background: #15182a; border-bottom: 1px solid #2a2d3e; letter-spacing: 0.05em; }
+
+  /* 活動ログ */
+  .feed { max-height: 60vh; overflow-y: auto; }
+  .feed-item { padding: 8px 14px; border-bottom: 1px solid #22253a; font-size: 0.82rem; display: flex; gap: 10px; align-items: flex-start; }
+  .feed-item:last-child { border-bottom: none; }
+  .feed-item .ts { color: #666; font-family: ui-monospace, monospace; font-size: 0.72rem; min-width: 60px; padding-top: 2px; }
+  .feed-item .actor { font-weight: 600; min-width: 80px; padding-top: 2px; }
+  .feed-item .msg { color: #ccc; flex: 1; word-break: break-word; }
+  .feed-item.lvl-success .actor { color: #4ade80; }
+  .feed-item.lvl-warn .actor { color: #fbbf24; }
+  .feed-item.lvl-error .actor { color: #f87171; }
+  .feed-item.lvl-info .actor { color: #7c8cf8; }
+  .feed-empty { padding: 20px; text-align: center; color: #555; font-size: 0.85rem; }
+
+  /* 案件テーブル */
+  table { width: 100%; border-collapse: collapse; }
+  th { background: #15182a; padding: 9px 12px; text-align: left; font-size: 0.72rem; color: #888; letter-spacing: 0.05em; }
+  td { padding: 9px 12px; font-size: 0.82rem; border-top: 1px solid #22253a; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; }
   .badge-new { background: #1e3a5f; color: #60a5fa; }
   .badge-inhouse { background: #1a3a2a; color: #4ade80; }
   .badge-outsource { background: #3a2a1a; color: #fb923c; }
   .badge-qc { background: #3a1a3a; color: #c084fc; }
   .badge-approved { background: #1a3a1a; color: #86efac; }
   .badge-skip { background: #2a2a2a; color: #666; }
-  .btn { padding: 4px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 0.8rem; }
+  .btn { padding: 3px 10px; border-radius: 4px; border: none; cursor: pointer; font-size: 0.75rem; margin-right: 4px; }
   .btn-approve { background: #166534; color: #86efac; }
   .btn-reject { background: #7f1d1d; color: #fca5a5; }
   a { color: #7c8cf8; text-decoration: none; }
   a:hover { text-decoration: underline; }
+
+  .scroll-x { overflow-x: auto; }
 </style>
 </head>
 <body>
 <header>
   <h1>AI総合商社 ダッシュボード</h1>
+  <div class="clock" id="clock">--:--:--</div>
 </header>
 
 <div class="stats" id="stats">読み込み中...</div>
 
-<div class="section">
-  <h2>案件一覧</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>タイトル</th>
-        <th>プラットフォーム</th>
-        <th>カテゴリ</th>
-        <th>単価</th>
-        <th>スコア</th>
-        <th>ステータス</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody id="jobs-table">読み込み中...</tbody>
-  </table>
+<h2 style="padding: 0 24px;">AI部門の稼働状況</h2>
+<div class="depts" id="depts"></div>
+
+<div class="grid2">
+  <div class="panel">
+    <h3>活動ログ（リアルタイム）</h3>
+    <div class="feed" id="feed"><div class="feed-empty">待機中…</div></div>
+  </div>
+  <div class="panel">
+    <h3>案件一覧</h3>
+    <div class="scroll-x">
+      <table>
+        <thead><tr>
+          <th>タイトル</th><th>プラットフォーム</th><th>カテゴリ</th><th>単価</th><th>スコア</th><th>ステータス</th><th>操作</th>
+        </tr></thead>
+        <tbody id="jobs-table"><tr><td colspan="7" class="feed-empty">読み込み中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
 const STATUS_LABELS = {
-  new: ['新着', 'badge-new'],
-  analyzing: ['分析中', 'badge-new'],
-  inhouse: ['自社処理予定', 'badge-inhouse'],
-  outsource: ['外注予定', 'badge-outsource'],
-  skipped: ['スキップ', 'badge-skip'],
-  in_progress: ['生産中', 'badge-inhouse'],
-  qc: ['QC中', 'badge-qc'],
-  pending_approval: ['承認待ち', 'badge-qc'],
-  approved: ['承認済み', 'badge-approved'],
-  delivered: ['納品済み', 'badge-approved'],
+  new: ['新着', 'badge-new'], analyzing: ['分析中', 'badge-new'],
+  inhouse: ['自社処理予定', 'badge-inhouse'], outsource: ['外注予定', 'badge-outsource'],
+  skipped: ['スキップ', 'badge-skip'], in_progress: ['生産中', 'badge-inhouse'],
+  qc: ['QC中', 'badge-qc'], pending_approval: ['承認待ち', 'badge-qc'],
+  approved: ['承認済み', 'badge-approved'], delivered: ['納品済み', 'badge-approved'],
   rejected: ['NG', 'badge-skip'],
 };
 
+// actor → 部門メタ
+const DEPTS = [
+  { actor: 'pipeline',  name: '統括（パイプライン）', icon: '🏢' },
+  { actor: 'scraper',   name: '営業部（巡回）',       icon: '🌐' },
+  { actor: 'analysis',  name: '分析部',               icon: '🧠' },
+  { actor: 'execution', name: '制作部',               icon: '✍️' },
+  { actor: 'qc',        name: 'QC部',                 icon: '🔍' },
+];
+const ACTIVE_WINDOW_MS = 30 * 1000;  // 直近30秒以内のイベントがあれば「稼働中」
+
+function fmtAgo(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'now';
+  if (ms < 60_000) return Math.round(ms/1000) + '秒前';
+  if (ms < 3600_000) return Math.round(ms/60_000) + '分前';
+  return Math.round(ms/3600_000) + '時間前';
+}
+
+function fmtClock(iso) {
+  const d = new Date(iso);
+  return d.toTimeString().slice(0,8);
+}
+
 async function loadStats() {
-  const r = await fetch('/api/stats');
-  const d = await r.json();
-  document.getElementById('stats').innerHTML = Object.entries(d).map(([k,v]) =>
-    `<div class="stat-card"><div class="num">${v}</div><div class="label">${k}</div></div>`
-  ).join('');
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    document.getElementById('stats').innerHTML = Object.entries(d).map(([k,v]) =>
+      `<div class="stat-card"><div class="num">${v}</div><div class="label">${k}</div></div>`
+    ).join('');
+  } catch (e) { console.warn('stats failed', e); }
+}
+
+async function loadActivity() {
+  try {
+    const r = await fetch('/api/activity');
+    const events = await r.json();
+    renderFeed(events);
+    renderDepts(events);
+  } catch (e) { console.warn('activity failed', e); }
+}
+
+function renderFeed(events) {
+  if (!events.length) {
+    document.getElementById('feed').innerHTML = '<div class="feed-empty">まだ活動なし。スケジューラの初回サイクル待ち。</div>';
+    return;
+  }
+  document.getElementById('feed').innerHTML = events.map(e => `
+    <div class="feed-item lvl-${e.level || 'info'}">
+      <div class="ts">${fmtClock(e.ts)}</div>
+      <div class="actor">${e.actor}</div>
+      <div class="msg"><b>${escapeHtml(e.action)}</b>${e.detail ? ' — ' + escapeHtml(e.detail) : ''}${e.job_id ? ' <span style="color:#666">#'+e.job_id+'</span>' : ''}</div>
+    </div>
+  `).join('');
+}
+
+function renderDepts(events) {
+  const now = Date.now();
+  const lastByActor = {};
+  // 新しい順なので最初に見つけたものが直近
+  for (const e of events) {
+    if (!lastByActor[e.actor]) lastByActor[e.actor] = e;
+  }
+  document.getElementById('depts').innerHTML = DEPTS.map(d => {
+    const last = lastByActor[d.actor];
+    const active = last && (now - new Date(last.ts).getTime()) < ACTIVE_WINDOW_MS;
+    const lastTxt = last ? `${last.action}${last.detail ? ' — ' + escapeHtml(last.detail) : ''}` : '—';
+    const ago = last ? fmtAgo(last.ts) : '未稼働';
+    return `<div class="dept ${active ? 'active' : ''}">
+      <div class="head">
+        <span class="dot"></span>
+        <span class="name">${d.icon} ${d.name}</span>
+        <span class="state">${active ? '稼働中' : '待機'}</span>
+      </div>
+      <div class="last">${lastTxt}</div>
+      <div class="ago">${ago}</div>
+    </div>`;
+  }).join('');
 }
 
 async function loadJobs() {
-  const r = await fetch('/api/jobs');
-  const jobs = await r.json();
-  const rows = jobs.map(j => {
-    const [label, cls] = STATUS_LABELS[j.status] || [j.status, 'badge-new'];
-    const price = j.price_fixed ? `¥${j.price_fixed.toLocaleString()}` :
-      j.price_min ? `¥${j.price_min.toLocaleString()}〜` : '不明';
-    const actions = j.status === 'pending_approval'
-      ? `<button class="btn btn-approve" onclick="approve(${j.id})">承認</button>
-         <button class="btn btn-reject" onclick="reject(${j.id})">却下</button>`
-      : '';
-    return `<tr>
-      <td><a href="${j.url}" target="_blank">${j.title.slice(0,40)}${j.title.length>40?'…':''}</a></td>
-      <td>${j.platform}</td>
-      <td>${j.category}</td>
-      <td>${price}</td>
-      <td>${j.score?.toFixed(0) ?? '-'}</td>
-      <td><span class="badge ${cls}">${label}</span></td>
-      <td>${actions}</td>
-    </tr>`;
-  });
-  document.getElementById('jobs-table').innerHTML = rows.join('') || '<tr><td colspan="7" style="text-align:center;color:#666">案件なし</td></tr>';
+  try {
+    const r = await fetch('/api/jobs');
+    const jobs = await r.json();
+    const rows = jobs.map(j => {
+      const [label, cls] = STATUS_LABELS[j.status] || [j.status, 'badge-new'];
+      const price = j.price_fixed ? `¥${j.price_fixed.toLocaleString()}` :
+        j.price_min ? `¥${j.price_min.toLocaleString()}〜` : '不明';
+      const actions = j.status === 'pending_approval'
+        ? `<button class="btn btn-approve" onclick="approve(${j.id})">承認</button>
+           <button class="btn btn-reject" onclick="reject(${j.id})">却下</button>`
+        : '';
+      return `<tr>
+        <td><a href="${j.url}" target="_blank">${escapeHtml(j.title.slice(0,40))}${j.title.length>40?'…':''}</a></td>
+        <td>${j.platform}</td>
+        <td>${j.category || '-'}</td>
+        <td>${price}</td>
+        <td>${j.score?.toFixed(0) ?? '-'}</td>
+        <td><span class="badge ${cls}">${label}</span></td>
+        <td>${actions}</td>
+      </tr>`;
+    });
+    document.getElementById('jobs-table').innerHTML = rows.join('') || '<tr><td colspan="7" class="feed-empty">案件なし</td></tr>';
+  } catch (e) { console.warn('jobs failed', e); }
 }
 
-async function approve(id) {
-  await fetch(`/api/jobs/${id}/approve`, {method:'POST'});
-  loadJobs();
-}
-async function reject(id) {
-  await fetch(`/api/jobs/${id}/reject`, {method:'POST'});
-  loadJobs();
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-loadStats();
-loadJobs();
-setInterval(() => { loadStats(); loadJobs(); }, 30000);
+async function approve(id) { await fetch(`/api/jobs/${id}/approve`, {method:'POST'}); refreshAll(); }
+async function reject(id)  { await fetch(`/api/jobs/${id}/reject`,  {method:'POST'}); refreshAll(); }
+
+function refreshAll() { loadStats(); loadJobs(); loadActivity(); }
+
+// 初回 + ポーリング
+refreshAll();
+setInterval(loadActivity, 3000);          // 活動ログは速めに
+setInterval(() => { loadStats(); loadJobs(); }, 15000);
+setInterval(() => { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }, 1000);
 </script>
 </body>
 </html>"""
@@ -182,6 +307,11 @@ async def get_jobs(status: Optional[str] = None, db: Session = Depends(get_db)):
         }
         for j in jobs
     ]
+
+
+@app.get("/api/activity")
+async def get_activity(limit: int = 100):
+    return get_events(limit=limit)
 
 
 @app.get("/api/jobs/{job_id}/deliverable")

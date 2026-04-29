@@ -19,6 +19,7 @@ from scrapers.base import RawJob
 from agents.analysis_agent import analyze_job
 from agents.execution_agent import execute_job
 from agents.quality_agent import check_quality
+from dashboard.events import log_event
 
 
 def _upsert_job(db: Session, raw: RawJob) -> tuple[Job, bool]:
@@ -50,6 +51,7 @@ def _upsert_job(db: Session, raw: RawJob) -> tuple[Job, bool]:
 async def _analyze(db: Session, job: Job):
     job.status = JobStatus.ANALYZING
     db.commit()
+    log_event("analysis", "分析中", job.title[:40], job_id=job.id)
 
     from scrapers.base import RawJob as R
     raw = R(
@@ -81,17 +83,25 @@ async def _analyze(db: Session, job: Job):
         job.status = JobStatus.SKIPPED
 
     db.commit()
-    print(f"[Pipeline] 分析完了 '{job.title[:30]}' → {job.status.value} (score={job.score:.0f})")
+    log_event(
+        "analysis",
+        "分析完了",
+        f"'{job.title[:30]}' → {job.status.value} (score={job.score:.0f})",
+        job_id=job.id,
+        level="success",
+    )
 
 
 async def _execute(db: Session, job: Job):
     job.status = JobStatus.IN_PROGRESS
     db.commit()
+    log_event("execution", "生産中", job.title[:40], job_id=job.id)
 
     content = await execute_job(job)
 
     job.status = JobStatus.QC
     db.commit()
+    log_event("qc", "QC中", job.title[:40], job_id=job.id)
 
     qc_result = await check_quality(job, content)
 
@@ -112,20 +122,32 @@ async def _execute(db: Session, job: Job):
 
     if qc_result["passed"]:
         job.status = JobStatus.PENDING_APPROVAL
-        print(f"[Pipeline] QC合格 '{job.title[:30]}' → 承認待ち")
+        log_event(
+            "qc",
+            "QC合格",
+            f"'{job.title[:30]}' → 承認待ち",
+            job_id=job.id,
+            level="success",
+        )
     else:
         job.status = JobStatus.REJECTED
-        print(f"[Pipeline] QC不合格 '{job.title[:30]}': {qc_result['summary']}")
+        log_event(
+            "qc",
+            "QC不合格",
+            f"'{job.title[:30]}': {qc_result['summary']}",
+            job_id=job.id,
+            level="warn",
+        )
 
     db.commit()
 
 
 async def run_pipeline():
-    print(f"[Pipeline] 開始 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_event("pipeline", "起動", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     # 1. 案件収集
     raw_jobs = await run_all_scrapers()
-    print(f"[Pipeline] 合計 {len(raw_jobs)} 件取得")
+    log_event("pipeline", "巡回完了", f"合計 {len(raw_jobs)} 件")
 
     # 2. DB保存 + 分析
     db = SessionLocal()
@@ -138,7 +160,7 @@ async def run_pipeline():
     finally:
         db.close()
 
-    print(f"[Pipeline] 新規案件 {len(new_jobs)} 件")
+    log_event("pipeline", "新規案件", f"{len(new_jobs)} 件")
 
     # 3. 分析（並行・最大5件同時）
     sem = asyncio.Semaphore(5)
@@ -166,7 +188,7 @@ async def run_pipeline():
     finally:
         db.close()
 
-    print(f"[Pipeline] 自社処理対象 {len(inhouse_ids)} 件（スコア70以上）")
+    log_event("pipeline", "自社処理対象", f"{len(inhouse_ids)} 件（スコア70以上）")
 
     async def execute_with_sem(job_id: int):
         async with sem:
@@ -180,4 +202,4 @@ async def run_pipeline():
 
     await asyncio.gather(*[execute_with_sem(jid) for jid in inhouse_ids])
 
-    print(f"[Pipeline] 完了")
+    log_event("pipeline", "サイクル完了", level="success")

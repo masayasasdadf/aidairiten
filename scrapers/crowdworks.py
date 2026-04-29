@@ -5,6 +5,7 @@ from typing import Optional
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
 from config import settings
+from dashboard.events import log_event
 from scrapers.base import BaseScraper, RawJob
 
 LOGIN_URL = "https://crowdworks.jp/login"
@@ -28,8 +29,10 @@ class CrowdworksScraper(BaseScraper):
 
     async def fetch_jobs(self) -> list[RawJob]:
         if not settings.crowdworks_email or not settings.crowdworks_password:
-            print("[CrowdWorks] 認証情報未設定のためスキップ")
+            log_event("scraper", "crowdworks", "認証情報未設定のためスキップ", level="warn")
             return []
+
+        log_event("scraper", "crowdworks", "巡回開始")
 
         jobs: list[RawJob] = []
         async with async_playwright() as p:
@@ -46,13 +49,13 @@ class CrowdworksScraper(BaseScraper):
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                         await page.wait_for_load_state("networkidle", timeout=15000)
                         items = await self._parse_list(page)
-                        print(f"[CrowdWorks] {url} → {len(items)}件")
+                        log_event("scraper", "crowdworks", f"{url} → {len(items)}件")
                         jobs.extend(items)
                         await asyncio.sleep(2)
                     except PlaywrightTimeout:
-                        print(f"[CrowdWorks] timeout {url}")
+                        log_event("scraper", "crowdworks", f"timeout {url}", level="warn")
                     except Exception as e:
-                        print(f"[CrowdWorks] fetch error {url}: {e}")
+                        log_event("scraper", "crowdworks", f"fetch error {url}: {e}", level="error")
             finally:
                 await context.close()
                 await browser.close()
@@ -79,16 +82,21 @@ class CrowdworksScraper(BaseScraper):
 
             # ログイン成否判定: URL に /login が残ってたら失敗
             if "/login" in page.url:
-                print(f"[CrowdWorks] ログイン失敗: 認証情報が無効またはCAPTCHA要求 (URL={page.url})")
+                log_event(
+                    "scraper",
+                    "crowdworks",
+                    f"ログイン失敗: 認証情報が無効またはCAPTCHA要求 (URL={page.url})",
+                    level="error",
+                )
                 return False
 
-            print(f"[CrowdWorks] ログイン成功 (URL={page.url})")
+            log_event("scraper", "crowdworks", f"ログイン成功 (URL={page.url})", level="success")
             return True
         except PlaywrightTimeout:
-            print(f"[CrowdWorks] ログインタイムアウト (URL={page.url})")
+            log_event("scraper", "crowdworks", f"ログインタイムアウト (URL={page.url})", level="error")
             return False
         except Exception as e:
-            print(f"[CrowdWorks] ログイン例外: {e}")
+            log_event("scraper", "crowdworks", f"ログイン例外: {e}", level="error")
             return False
 
     async def _parse_list(self, page: Page) -> list[RawJob]:
