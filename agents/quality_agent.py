@@ -1,12 +1,8 @@
 import json
 
-from openai import OpenAI
-
 from agents.directives import inject as inject_directives
-from config import settings
+from agents.llm import get_client
 from db.models import Job
-
-client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 SYSTEM_PROMPT = """あなたはAI総合商社の品質管理担当AIです。
 制作した成果物がクライアントの要件を満たしているか厳密に審査します。
@@ -44,7 +40,7 @@ async def check_quality(job: Job, content: str) -> dict:
         content=content[:3000],
     )
 
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model="deepseek-chat",
         max_tokens=512,
         messages=[

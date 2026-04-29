@@ -108,6 +108,33 @@ class SystemControl(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AppSetting(Base):
+    """API キー・各プラットフォーム認証情報など、UI から設定可能な値。
+
+    env vars よりこちらが優先される。値は平文 (本番運用なら Vault/KMS 推奨)。
+    """
+
+    __tablename__ = "app_settings"
+
+    key = Column(String(80), primary_key=True)
+    value = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EventLog(Base):
+    """活動ログの永続化 (Render コールドスタートでもメモリ deque を復元)。"""
+
+    __tablename__ = "event_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor = Column(String(50), nullable=False, index=True)
+    action = Column(String(200), nullable=False)
+    detail = Column(Text, nullable=False, default="")
+    job_id = Column(Integer, nullable=True, index=True)
+    level = Column(String(20), nullable=False, default="info")
+    ts = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Deliverable(Base):
     __tablename__ = "deliverables"
 

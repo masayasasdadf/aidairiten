@@ -3,7 +3,8 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    deepseek_api_key: str = Field(..., env="DEEPSEEK_API_KEY")
+    # 必須から緩和: UI から後で設定可能
+    deepseek_api_key: str = Field("", env="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field("https://api.deepseek.com", env="DEEPSEEK_BASE_URL")
 
     database_url: str = Field("sqlite:///./aidairiten.db", env="DATABASE_URL")

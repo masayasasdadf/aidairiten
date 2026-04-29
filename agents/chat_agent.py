@@ -4,15 +4,11 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
-from openai import OpenAI
-
-from config import settings
+from agents.llm import get_client
 from dashboard.events import log_event
 from db.control import pause as pause_ops, resume as resume_ops, get_state
 from db.database import SessionLocal
 from db.models import ChatMessage, Directive
-
-client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 # スレッド名 (= 部門) → ペルソナ
 PERSONAS = {
@@ -289,6 +285,7 @@ async def chat(thread: str, user_message: str) -> dict:
     tool_results: list[dict] = []
 
     # 最大 4 ターンまで tool ループ
+    client = get_client()
     for _ in range(4):
         resp = client.chat.completions.create(
             model="deepseek-chat",

@@ -1,10 +1,6 @@
-from openai import OpenAI
-
 from agents.directives import inject as inject_directives
-from config import settings
+from agents.llm import get_client
 from db.models import Job, JobCategory
-
-client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 SYSTEM_PROMPT = """あなたはAI総合商社の制作担当AIです。
 クライアントから依頼された案件を高品質に仕上げます。
@@ -103,7 +99,7 @@ async def execute_job(job: Job) -> str:
         description=job.description or "",
     )
 
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model="deepseek-chat",
         max_tokens=4096,
         messages=[

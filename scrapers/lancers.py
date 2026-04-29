@@ -4,7 +4,7 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 
-from config import settings
+from db.credentials import get_credential
 from scrapers.base import BaseScraper, RawJob
 
 SEARCH_URLS = [
@@ -24,7 +24,7 @@ class LancersScraper(BaseScraper):
     platform_name = "lancers"
 
     async def fetch_jobs(self) -> list[RawJob]:
-        if not settings.lancers_email or not settings.lancers_password:
+        if not get_credential("lancers_email") or not get_credential("lancers_password"):
             print("[Lancers] 認証情報未設定のためスキップ")
             return []
 

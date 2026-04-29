@@ -2,15 +2,14 @@ import re
 import asyncio
 from typing import Optional
 
-from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright, Page, BrowserContext, TimeoutError as PlaywrightTimeout
 
-from config import settings
 from dashboard.events import log_event
+from db.credentials import get_credential
 from scrapers.base import BaseScraper, RawJob
 
 LOGIN_URL = "https://crowdworks.jp/login"
 
-# ログイン後にアクセスする検索ページ
 SEARCH_URLS = [
     "https://crowdworks.jp/public/jobs/search?job_type=writing&order=new",
     "https://crowdworks.jp/public/jobs/search?job_type=web_creation&order=new",
@@ -23,94 +22,89 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# 並列営業マンの人数 (Render Free 512MB を考慮して2人。Standard なら 4 まで上げてもいい)
+PARALLEL_WORKERS = 2
+
 
 class CrowdworksScraper(BaseScraper):
     platform_name = "crowdworks"
 
     async def fetch_jobs(self) -> list[RawJob]:
-        if not settings.crowdworks_email or not settings.crowdworks_password:
-            log_event("scraper", "crowdworks", "認証情報未設定 → 公開ページで巡回", level="warn")
-            return await self._fetch_public()
+        email = get_credential("crowdworks_email")
+        password = get_credential("crowdworks_password")
 
         log_event("scraper", "crowdworks", "巡回開始")
 
-        jobs: list[RawJob] = []
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
-            page = await context.new_page()
             try:
-                logged_in = await self._login(page)
-                if not logged_in:
+                logged_in = False
+                if email and password:
+                    page = await context.new_page()
+                    try:
+                        logged_in = await self._login(page, email, password)
+                    finally:
+                        await page.close()
+                    if not logged_in:
+                        log_event(
+                            "scraper",
+                            "crowdworks",
+                            "ログイン失敗 → 公開ページで巡回続行",
+                            level="warn",
+                        )
+                else:
                     log_event(
                         "scraper",
                         "crowdworks",
-                        "ログイン失敗 → 公開ページで巡回続行",
+                        "認証情報未設定 → 公開ページで巡回",
                         level="warn",
                     )
 
-                for url in SEARCH_URLS:
+                jobs = await self._scrape_urls_parallel(context, SEARCH_URLS, public=not logged_in)
+            finally:
+                await context.close()
+                await browser.close()
+
+        dedup: dict[str, RawJob] = {}
+        for j in jobs:
+            dedup[j.external_id] = j
+        return list(dedup.values())
+
+    async def _scrape_urls_parallel(
+        self, context: BrowserContext, urls: list[str], public: bool
+    ) -> list[RawJob]:
+        """営業マン PARALLEL_WORKERS 人で URL を分担巡回。"""
+
+        sem = asyncio.Semaphore(PARALLEL_WORKERS)
+        prefix = "(公開) " if public else ""
+
+        async def scrape_one(url: str) -> list[RawJob]:
+            async with sem:
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        # SPA 描画待ち: 案件カードのリンクがDOMに出るまで最大10秒
-                        try:
-                            await page.wait_for_selector(
-                                'a[href*="/public/jobs/"]', timeout=10000
-                            )
-                        except PlaywrightTimeout:
-                            pass
-                        await asyncio.sleep(1)
-                        items = await self._parse_list(page)
-                        log_event("scraper", "crowdworks", f"{url} → {len(items)}件")
-                        jobs.extend(items)
-                        await asyncio.sleep(2)
+                        await page.wait_for_selector('a[href*="/public/jobs/"]', timeout=10000)
                     except PlaywrightTimeout:
-                        log_event("scraper", "crowdworks", f"timeout {url}", level="warn")
-                    except Exception as e:
-                        log_event("scraper", "crowdworks", f"fetch error {url}: {e}", level="error")
-            finally:
-                await context.close()
-                await browser.close()
+                        pass
+                    await asyncio.sleep(1)
+                    items = await self._parse_list(page)
+                    log_event("scraper", "crowdworks", f"{prefix}{url} → {len(items)}件")
+                    return items
+                except PlaywrightTimeout:
+                    log_event("scraper", "crowdworks", f"{prefix}timeout {url}", level="warn")
+                    return []
+                except Exception as e:
+                    log_event("scraper", "crowdworks", f"{prefix}fetch error {url}: {e}", level="error")
+                    return []
+                finally:
+                    await page.close()
 
-        # 重複排除（複数カテゴリで同じ案件が出ることがある）
-        dedup: dict[str, RawJob] = {}
-        for j in jobs:
-            dedup[j.external_id] = j
-        return list(dedup.values())
+        results = await asyncio.gather(*[scrape_one(u) for u in urls])
+        return [j for sub in results for j in sub]
 
-    async def _fetch_public(self) -> list[RawJob]:
-        """ログイン無しで公開検索ページを巡回（フォールバック）。"""
-
-        jobs: list[RawJob] = []
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
-            page = await context.new_page()
-            try:
-                for url in SEARCH_URLS:
-                    try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        try:
-                            await page.wait_for_selector('a[href*="/public/jobs/"]', timeout=10000)
-                        except PlaywrightTimeout:
-                            pass
-                        await asyncio.sleep(1)
-                        items = await self._parse_list(page)
-                        log_event("scraper", "crowdworks", f"(公開) {url} → {len(items)}件")
-                        jobs.extend(items)
-                        await asyncio.sleep(2)
-                    except Exception as e:
-                        log_event("scraper", "crowdworks", f"(公開) fetch error {url}: {e}", level="error")
-            finally:
-                await context.close()
-                await browser.close()
-        dedup: dict[str, RawJob] = {}
-        for j in jobs:
-            dedup[j.external_id] = j
-        return list(dedup.values())
-
-    async def _login(self, page: Page) -> bool:
-        # Step 1: ログインページを開く
+    async def _login(self, page: Page, email: str, password: str) -> bool:
         try:
             await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
         except PlaywrightTimeout:
@@ -120,42 +114,60 @@ class CrowdworksScraper(BaseScraper):
         title = await page.title()
         log_event("scraper", "crowdworks", f"ログインページ到達 (title={title!r})")
 
-        # Step 2: メール欄を待つ
-        email_sel = 'input[name="username"], input[name="email"], input[type="email"], input#username, input#email'
-        pass_sel = 'input[name="password"], input[type="password"], input#password'
-        try:
-            await page.wait_for_selector(email_sel, timeout=15000, state="visible")
-        except PlaywrightTimeout:
+        # CrowdWorks の現行ログインフォームに合わせたセレクタを優先
+        email_candidates = [
+            'input[name="username"]',
+            'input[name="username_or_email"]',
+            'input[name="email"]',
+            'input#username',
+            'input#email',
+            'input[type="email"]',
+            'input[type="text"][autocomplete*="email"]',
+            'input[type="text"][autocomplete*="username"]',
+        ]
+        pass_candidates = [
+            'input[name="password"]',
+            'input#password',
+            'input[type="password"]',
+        ]
+
+        email_sel = await self._first_visible(page, email_candidates, timeout=15000)
+        if not email_sel:
+            try:
+                body_text = (await page.inner_text("body"))[:300].replace("\n", " ")
+            except Exception:
+                body_text = ""
             log_event(
                 "scraper",
                 "crowdworks",
-                f"ログインフォーム検出失敗 (URL={page.url}, title={title!r})",
+                f"ログインフォーム検出失敗 (URL={page.url}, title={title!r}) body先頭: {body_text}",
                 level="error",
             )
             return False
 
-        # Step 3: 入力 → Enter で送信（ボタンセレクタの揺れを回避）
+        pass_sel = await self._first_visible(page, pass_candidates, timeout=2000)
+        if not pass_sel:
+            log_event("scraper", "crowdworks", "パスワード欄が見つからず", level="error")
+            return False
+
         try:
-            await page.fill(email_sel, settings.crowdworks_email)
-            await page.fill(pass_sel, settings.crowdworks_password)
+            await page.fill(email_sel, email)
+            await page.fill(pass_sel, password)
             await page.press(pass_sel, "Enter")
         except Exception as e:
             log_event("scraper", "crowdworks", f"フォーム入力例外: {e}", level="error")
             return False
 
-        # Step 4: /login から遷移するのを待つ。networkidle は GA 等で永遠に来ないので使わない
         try:
             await page.wait_for_url(
                 lambda url: "/login" not in url and "/sign_in" not in url,
                 timeout=20000,
             )
         except PlaywrightTimeout:
-            # /login に留まっている = 認証失敗 or CAPTCHA
-            body_snippet = ""
             try:
                 body_snippet = (await page.inner_text("body"))[:200].replace("\n", " ")
             except Exception:
-                pass
+                body_snippet = ""
             log_event(
                 "scraper",
                 "crowdworks",
@@ -167,8 +179,24 @@ class CrowdworksScraper(BaseScraper):
         log_event("scraper", "crowdworks", f"ログイン成功 (URL={page.url})", level="success")
         return True
 
+    @staticmethod
+    async def _first_visible(page: Page, candidates: list[str], timeout: int) -> Optional[str]:
+        """候補セレクタを順に試して、可視で存在する最初のものを返す。"""
+
+        end = asyncio.get_event_loop().time() + (timeout / 1000)
+        # 最初の数秒は描画待ち。その後は即チェックで諦める
+        while asyncio.get_event_loop().time() < end:
+            for sel in candidates:
+                try:
+                    locator = page.locator(sel).first
+                    if await locator.count() > 0 and await locator.is_visible():
+                        return sel
+                except Exception:
+                    continue
+            await asyncio.sleep(0.5)
+        return None
+
     async def _parse_list(self, page: Page) -> list[RawJob]:
-        # JS で全リンクを走査して案件 ID 単位にユニーク化、カードのテキストも吸い出す
         items = await page.evaluate(
             """
             () => {
@@ -211,7 +239,6 @@ class CrowdworksScraper(BaseScraper):
         return results
 
     def _extract_price(self, text: str) -> Optional[int]:
-        # "10,000円" のような最初に出る金額表記を拾う
         m = re.search(r"([\d,]+)\s*円", text)
         if not m:
             return None

@@ -4,7 +4,7 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 
-from config import settings
+from db.credentials import get_credential
 from scrapers.base import BaseScraper, RawJob
 
 # ココナラはサービス出品型なので「依頼（リクエスト）」ボードを監視
@@ -24,7 +24,7 @@ class CoconalaScraper(BaseScraper):
     platform_name = "coconala"
 
     async def fetch_jobs(self) -> list[RawJob]:
-        if not settings.coconala_email or not settings.coconala_password:
+        if not get_credential("coconala_email") or not get_credential("coconala_password"):
             print("[Coconala] 認証情報未設定のためスキップ")
             return []
 

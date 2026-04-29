@@ -10,6 +10,7 @@ import asyncio
 
 from agents.chat_agent import chat as chat_agent_run, fetch_history, PERSONAS as CHAT_THREADS
 from db.control import get_state as get_control_state, pause as pause_ops, resume as resume_ops
+from db.credentials import all_credentials_masked, set_credential, CREDENTIAL_KEYS
 from db.database import get_db, init_db
 from db.models import Job, Deliverable, Directive, JobStatus
 from dashboard.events import get_events, log_event
@@ -26,6 +27,11 @@ class DirectiveIn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
+
+
+class CredentialIn(BaseModel):
+    key: str
+    value: str = ""
 
 app = FastAPI(title="AI総合商社 ダッシュボード")
 
@@ -86,7 +92,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .panel h3 { font-size: 0.8rem; color: #aaa; padding: 10px 14px; background: #15182a; border-bottom: 1px solid #2a2d3e; letter-spacing: 0.05em; }
 
   /* 活動ログ */
-  .feed { max-height: 60vh; overflow-y: auto; }
+  .feed { max-height: 70vh; overflow-y: auto; }
   .feed-item { padding: 8px 14px; border-bottom: 1px solid #22253a; font-size: 0.82rem; display: flex; gap: 10px; align-items: flex-start; }
   .feed-item:last-child { border-bottom: none; }
   .feed-item .ts { color: #666; font-family: ui-monospace, monospace; font-size: 0.72rem; min-width: 60px; padding-top: 2px; }
@@ -166,6 +172,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .chat-form button:disabled { opacity: 0.5; cursor: not-allowed; }
   .chat-empty { color: #555; text-align: center; padding: 40px 0; font-size: 0.85rem; }
   .typing { color: #666; font-size: 0.8rem; font-style: italic; }
+
+  /* 認証情報 */
+  .creds-section { padding: 0 24px 18px; }
+  .creds-panel { background: #1a1d2e; border: 1px solid #2a2d3e; border-radius: 10px; }
+  .creds-panel h3 { font-size: 0.85rem; color: #aaa; padding: 10px 14px; background: #15182a; border-bottom: 1px solid #2a2d3e; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
+  .creds-panel h3 .toggle { margin-left: auto; color: #666; font-size: 0.75rem; }
+  .creds-body { padding: 14px; display: none; }
+  .creds-body.open { display: block; }
+  .creds-grid { display: grid; grid-template-columns: 200px 1fr 100px 80px; gap: 8px; align-items: center; font-size: 0.82rem; }
+  .creds-grid > .row-label { color: #aaa; }
+  .creds-grid > .row-status { color: #666; font-family: ui-monospace, monospace; font-size: 0.75rem; }
+  .creds-grid > input { background: #0f1117; color: #e0e0e0; border: 1px solid #3a3d5e; border-radius: 5px; padding: 6px 10px; font-size: 0.82rem; font-family: inherit; }
+  .creds-grid > .row-btn { display:flex; gap:4px; }
+  .creds-grid > .row-btn button { padding: 5px 8px; border-radius: 4px; border: 1px solid #3a3d5e; background: transparent; color: #ccc; cursor: pointer; font-size: 0.72rem; }
+  .creds-grid > .row-btn button:hover { background: #2a2d3e; }
+  .creds-note { color: #666; font-size: 0.72rem; margin-top: 8px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -182,6 +204,19 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="control-banner active" id="control-banner" style="display:none">
   <span id="control-text"></span>
   <button onclick="resumeOps()" id="control-resume" style="display:none">即時再開</button>
+</div>
+
+<div class="creds-section">
+  <div class="creds-panel">
+    <h3 onclick="toggleCreds()">🔐 認証情報・APIキー <span class="toggle" id="creds-toggle">[展開]</span></h3>
+    <div class="creds-body" id="creds-body">
+      <div class="creds-grid" id="creds-grid"></div>
+      <div class="creds-note">
+        ここで設定した値は DB に保存され、Render の環境変数より優先されます。<br>
+        DeepSeek API キー: <a href="https://platform.deepseek.com/" target="_blank">platform.deepseek.com</a> で取得（残高チャージ忘れずに）
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="god-section">
@@ -455,6 +490,71 @@ async function releaseDirective(id) {
   loadActivity();
 }
 
+// ---- 認証情報 ----
+const CRED_LABELS = {
+  deepseek_api_key: 'DeepSeek API キー',
+  deepseek_base_url: 'DeepSeek BaseURL',
+  crowdworks_email: 'CrowdWorks メール',
+  crowdworks_password: 'CrowdWorks パスワード',
+  lancers_email: 'Lancers メール',
+  lancers_password: 'Lancers パスワード',
+  coconala_email: 'Coconala メール',
+  coconala_password: 'Coconala パスワード',
+};
+
+function toggleCreds() {
+  const body = document.getElementById('creds-body');
+  const tog = document.getElementById('creds-toggle');
+  body.classList.toggle('open');
+  tog.textContent = body.classList.contains('open') ? '[折りたたむ]' : '[展開]';
+  if (body.classList.contains('open')) loadCredentials();
+}
+
+async function loadCredentials() {
+  try {
+    const r = await fetch('/api/credentials');
+    const d = await r.json();
+    const grid = document.getElementById('creds-grid');
+    const rows = Object.entries(CRED_LABELS).map(([k, label]) => {
+      const meta = d[k] || { set: false, preview: '' };
+      const ph = meta.set ? `現在: ${meta.preview} (上書きで再設定)` : '未設定';
+      return `
+        <div class="row-label">${label}</div>
+        <input id="cred-${k}" type="text" placeholder="${ph}" autocomplete="off" />
+        <div class="row-status">${meta.set ? '✓ 設定済み' : '— 未設定'}</div>
+        <div class="row-btn">
+          <button onclick="saveCred('${k}')">保存</button>
+          ${meta.set ? `<button onclick="clearCred('${k}')">削除</button>` : ''}
+        </div>
+      `;
+    }).join('');
+    grid.innerHTML = rows;
+  } catch (e) { console.warn('credentials failed', e); }
+}
+
+async function saveCred(key) {
+  const el = document.getElementById('cred-' + key);
+  const value = el.value.trim();
+  if (!value) { alert('値を入力してください'); return; }
+  const r = await fetch('/api/credentials', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ key, value }),
+  });
+  if (r.ok) { el.value = ''; loadCredentials(); loadActivity(); }
+  else { alert('保存失敗: ' + r.status); }
+}
+
+async function clearCred(key) {
+  if (!confirm('この値を削除する？')) return;
+  await fetch('/api/credentials', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ key, value: '' }),
+  });
+  loadCredentials(); loadActivity();
+}
+
 function refreshAll() { loadStats(); loadJobs(); loadActivity(); loadDirectives(); loadControl(); }
 
 async function loadControl() {
@@ -613,7 +713,7 @@ async def get_jobs(status: Optional[str] = None, db: Session = Depends(get_db)):
 
 
 @app.get("/api/activity")
-async def get_activity(limit: int = 100):
+async def get_activity(limit: int = 200):
     return get_events(limit=limit)
 
 
@@ -707,6 +807,25 @@ async def post_job_go(job_id: int):
 @app.post("/api/jobs/{job_id}/skip")
 async def post_job_skip(job_id: int):
     return skip_job(job_id)
+
+
+@app.get("/api/credentials")
+async def get_credentials():
+    return all_credentials_masked()
+
+
+@app.post("/api/credentials")
+async def post_credential(payload: CredentialIn):
+    if payload.key not in CREDENTIAL_KEYS:
+        raise HTTPException(status_code=400, detail=f"key は {CREDENTIAL_KEYS} のいずれか")
+    set_credential(payload.key, payload.value.strip())
+    log_event(
+        "system",
+        "認証情報更新",
+        f"{payload.key} ({'設定' if payload.value else 'クリア'})",
+        level="success",
+    )
+    return {"ok": True}
 
 
 @app.get("/api/chat/{thread}")

@@ -1,13 +1,9 @@
 import json
 
-from openai import OpenAI
-
 from agents.directives import inject as inject_directives
-from config import settings
+from agents.llm import get_client
 from db.models import JobCategory, ExecutionType
 from scrapers.base import RawJob
-
-client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 SYSTEM_PROMPT = """あなたはAI総合商社の案件分析担当AIです。
 クラウドソーシングプラットフォームから取得した案件を分析し、受注すべきかどうか判断します。
@@ -76,7 +72,7 @@ async def analyze_job(job: RawJob) -> dict:
         platform=job.platform,
     )
 
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model="deepseek-chat",
         max_tokens=512,
         messages=[
