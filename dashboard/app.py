@@ -1,11 +1,22 @@
+from datetime import datetime
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 
 from db.database import get_db, init_db
-from db.models import Job, Deliverable, JobStatus
-from dashboard.events import get_events
+from db.models import Job, Deliverable, Directive, JobStatus
+from dashboard.events import get_events, log_event
+
+
+_VALID_TARGETS = {"all", "analysis", "execution", "qc"}
+
+
+class DirectiveIn(BaseModel):
+    target: str = Field(..., description="all / analysis / execution / qc")
+    instruction: str = Field(..., min_length=1, max_length=2000)
 
 app = FastAPI(title="AI総合商社 ダッシュボード")
 
@@ -96,6 +107,27 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   a:hover { text-decoration: underline; }
 
   .scroll-x { overflow-x: auto; }
+
+  /* 神の声 */
+  .god-section { padding: 0 24px 18px; }
+  .god-panel { background: linear-gradient(135deg, #1a1d2e 0%, #2a1d3e 100%); border: 1px solid #5a3d8e; border-radius: 10px; padding: 16px; }
+  .god-panel h2 { color: #c084fc; margin-bottom: 10px; display:flex; align-items:center; gap:8px; }
+  .god-form { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .god-form select, .god-form input, .god-form button {
+    background: #0f1117; color: #e0e0e0; border: 1px solid #3a3d5e; border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; font-family: inherit;
+  }
+  .god-form input { flex: 1; min-width: 280px; }
+  .god-form select { min-width: 130px; cursor: pointer; }
+  .god-form button { background: #7c3aed; border-color: #7c3aed; color: white; cursor: pointer; font-weight: 600; padding: 8px 18px; }
+  .god-form button:hover { background: #6d28d9; }
+  .god-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .god-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .god-item { display: flex; gap: 10px; align-items: flex-start; background: #0f1117; padding: 8px 12px; border-radius: 6px; border: 1px solid #2a2d3e; font-size: 0.82rem; }
+  .god-item .scope { color: #c084fc; font-weight: 600; min-width: 80px; font-size: 0.75rem; padding-top: 2px; }
+  .god-item .text { flex: 1; color: #ddd; word-break: break-word; }
+  .god-item .release { background: transparent; border: 1px solid #5a3d5e; color: #c084fc; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.72rem; }
+  .god-item .release:hover { background: #5a3d5e33; }
+  .god-empty { color: #666; font-size: 0.82rem; padding: 6px 0; }
 </style>
 </head>
 <body>
@@ -105,6 +137,23 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 
 <div class="stats" id="stats">読み込み中...</div>
+
+<div class="god-section">
+  <div class="god-panel">
+    <h2>⚡ 神の声（上層部からの最重要指示）</h2>
+    <form class="god-form" id="god-form" onsubmit="return submitDirective(event)">
+      <select id="god-target">
+        <option value="all">全社へ</option>
+        <option value="analysis">分析部へ</option>
+        <option value="execution">制作部へ</option>
+        <option value="qc">QC部へ</option>
+      </select>
+      <input id="god-text" type="text" placeholder="例: スコア80未満の案件はすべて却下せよ / 文体を関西弁にしろ / 工数3時間超は外注扱いにしろ" maxlength="2000" required />
+      <button type="submit" id="god-submit">発令</button>
+    </form>
+    <div class="god-list" id="god-list"><div class="god-empty">アクティブな指示なし</div></div>
+  </div>
+</div>
 
 <h2 style="padding: 0 24px;">AI部門の稼働状況</h2>
 <div class="depts" id="depts"></div>
@@ -145,6 +194,8 @@ const DEPTS = [
   { actor: 'execution', name: '制作部',               icon: '✍️' },
   { actor: 'qc',        name: 'QC部',                 icon: '🔍' },
 ];
+
+const TARGET_LABEL = { all: '全社', analysis: '分析部', execution: '制作部', qc: 'QC部' };
 const ACTIVE_WINDOW_MS = 30 * 1000;  // 直近30秒以内のイベントがあれば「稼働中」
 
 function fmtAgo(iso) {
@@ -252,12 +303,62 @@ function escapeHtml(s) {
 async function approve(id) { await fetch(`/api/jobs/${id}/approve`, {method:'POST'}); refreshAll(); }
 async function reject(id)  { await fetch(`/api/jobs/${id}/reject`,  {method:'POST'}); refreshAll(); }
 
-function refreshAll() { loadStats(); loadJobs(); loadActivity(); }
+async function loadDirectives() {
+  try {
+    const r = await fetch('/api/directives');
+    const items = await r.json();
+    const el = document.getElementById('god-list');
+    if (!items.length) { el.innerHTML = '<div class="god-empty">アクティブな指示なし</div>'; return; }
+    el.innerHTML = items.map(d => `
+      <div class="god-item">
+        <div class="scope">${TARGET_LABEL[d.target] || d.target}</div>
+        <div class="text">${escapeHtml(d.instruction)}</div>
+        <button class="release" onclick="releaseDirective(${d.id})">解除</button>
+      </div>
+    `).join('');
+  } catch (e) { console.warn('directives failed', e); }
+}
+
+async function submitDirective(ev) {
+  ev.preventDefault();
+  const target = document.getElementById('god-target').value;
+  const text = document.getElementById('god-text').value.trim();
+  if (!text) return false;
+  const btn = document.getElementById('god-submit');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/directives', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, instruction: text }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert('発令失敗: ' + (err.detail || r.status));
+    } else {
+      document.getElementById('god-text').value = '';
+      await loadDirectives();
+      await loadActivity();
+    }
+  } finally {
+    btn.disabled = false;
+  }
+  return false;
+}
+
+async function releaseDirective(id) {
+  if (!confirm('この指示を解除する？')) return;
+  await fetch(`/api/directives/${id}`, { method: 'DELETE' });
+  loadDirectives();
+  loadActivity();
+}
+
+function refreshAll() { loadStats(); loadJobs(); loadActivity(); loadDirectives(); }
 
 // 初回 + ポーリング
 refreshAll();
 setInterval(loadActivity, 3000);          // 活動ログは速めに
-setInterval(() => { loadStats(); loadJobs(); }, 15000);
+setInterval(() => { loadStats(); loadJobs(); loadDirectives(); }, 15000);
 setInterval(() => { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }, 1000);
 </script>
 </body>
@@ -312,6 +413,57 @@ async def get_jobs(status: Optional[str] = None, db: Session = Depends(get_db)):
 @app.get("/api/activity")
 async def get_activity(limit: int = 100):
     return get_events(limit=limit)
+
+
+@app.get("/api/directives")
+async def list_directives(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Directive)
+        .filter(Directive.active.is_(True))
+        .order_by(Directive.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": d.id,
+            "target": d.target,
+            "instruction": d.instruction,
+            "created_at": d.created_at.isoformat() + "Z" if d.created_at else None,
+        }
+        for d in rows
+    ]
+
+
+@app.post("/api/directives")
+async def create_directive(payload: DirectiveIn, db: Session = Depends(get_db)):
+    target = payload.target.strip().lower()
+    if target not in _VALID_TARGETS:
+        raise HTTPException(status_code=400, detail=f"target は {sorted(_VALID_TARGETS)} のいずれか")
+    instruction = payload.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction が空です")
+
+    d = Directive(target=target, instruction=instruction, active=True)
+    db.add(d)
+    db.commit()
+    db.refresh(d)
+
+    scope = "全社" if target == "all" else f"{target}部"
+    log_event("god", "神の声", f"[{scope}] {instruction[:120]}", level="warn")
+    return {"id": d.id, "target": d.target, "instruction": d.instruction}
+
+
+@app.delete("/api/directives/{directive_id}")
+async def deactivate_directive(directive_id: int, db: Session = Depends(get_db)):
+    d = db.query(Directive).filter(Directive.id == directive_id).first()
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    d.active = False
+    d.deactivated_at = datetime.utcnow()
+    db.commit()
+    scope = "全社" if d.target == "all" else f"{d.target}部"
+    log_event("god", "神の声 解除", f"[{scope}] {d.instruction[:120]}", level="warn")
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{job_id}/deliverable")

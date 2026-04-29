@@ -2,6 +2,7 @@ import json
 
 from openai import OpenAI
 
+from agents.directives import inject as inject_directives
 from config import settings
 from db.models import JobCategory, ExecutionType
 from scrapers.base import RawJob
@@ -79,7 +80,7 @@ async def analyze_job(job: RawJob) -> dict:
         model="deepseek-chat",
         max_tokens=512,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": inject_directives(SYSTEM_PROMPT, "analysis")},
             {"role": "user", "content": prompt},
         ],
         response_format={"type": "json_object"},

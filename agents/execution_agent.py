@@ -1,5 +1,6 @@
 from openai import OpenAI
 
+from agents.directives import inject as inject_directives
 from config import settings
 from db.models import Job, JobCategory
 
@@ -106,7 +107,7 @@ async def execute_job(job: Job) -> str:
         model="deepseek-chat",
         max_tokens=4096,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": inject_directives(SYSTEM_PROMPT, "execution")},
             {"role": "user", "content": prompt},
         ],
     )

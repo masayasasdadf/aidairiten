@@ -2,6 +2,7 @@ import json
 
 from openai import OpenAI
 
+from agents.directives import inject as inject_directives
 from config import settings
 from db.models import Job
 
@@ -47,7 +48,7 @@ async def check_quality(job: Job, content: str) -> dict:
         model="deepseek-chat",
         max_tokens=512,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": inject_directives(SYSTEM_PROMPT, "qc")},
             {"role": "user", "content": prompt},
         ],
         response_format={"type": "json_object"},

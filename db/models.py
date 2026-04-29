@@ -61,6 +61,23 @@ class Job(Base):
     deliverable = relationship("Deliverable", back_populates="job", uselist=False)
 
 
+class Directive(Base):
+    """神の声: ユーザーから AI エージェントへの上書き指示。
+
+    target: 'all' / 'analysis' / 'execution' / 'qc'
+    アクティブなものは各エージェントの system prompt 末尾に注入される。
+    """
+
+    __tablename__ = "directives"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target = Column(String(50), nullable=False, default="all")
+    instruction = Column(Text, nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    deactivated_at = Column(DateTime, nullable=True)
+
+
 class Deliverable(Base):
     __tablename__ = "deliverables"
 
