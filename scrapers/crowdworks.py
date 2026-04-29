@@ -1,4 +1,5 @@
 import re
+import os
 import asyncio
 from typing import Optional
 
@@ -22,8 +23,22 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# 並列営業マンの人数 (Render Free 512MB を考慮して2人。Standard なら 4 まで上げてもいい)
-PARALLEL_WORKERS = 2
+# 並列営業マンの人数。Render Free 512MB では 1 が安全。
+# Standard 以上に上げたら env で SCRAPER_WORKERS=2〜4 に増やす
+PARALLEL_WORKERS = int(os.environ.get("SCRAPER_WORKERS", "1"))
+
+# Free tier OOM 対策 + コンテナ環境向けの Chromium 省メモリフラグ
+CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",  # /tmp を使う (Render の /dev/shm は小さい)
+    "--disable-gpu",
+    "--disable-extensions",
+    "--no-zygote",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--mute-audio",
+]
 
 
 class CrowdworksScraper(BaseScraper):
@@ -36,7 +51,7 @@ class CrowdworksScraper(BaseScraper):
         log_event("scraper", "crowdworks", "巡回開始")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
             context = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
             try:
                 logged_in = False

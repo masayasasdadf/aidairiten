@@ -41,6 +41,13 @@ def _startup() -> None:
     init_db()
 
 
+@app.get("/healthz")
+async def healthz():
+    """Render の health check 用。DB も LLM も叩かず即200を返す。"""
+
+    return {"ok": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return _DASHBOARD_HTML
