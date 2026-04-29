@@ -4,6 +4,7 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 
+from config import settings
 from scrapers.base import BaseScraper, RawJob
 
 # ココナラはサービス出品型なので「依頼（リクエスト）」ボードを監視
@@ -23,6 +24,10 @@ class CoconalaScraper(BaseScraper):
     platform_name = "coconala"
 
     async def fetch_jobs(self) -> list[RawJob]:
+        if not settings.coconala_email or not settings.coconala_password:
+            print("[Coconala] 認証情報未設定のためスキップ")
+            return []
+
         jobs = []
         async with httpx.AsyncClient(headers=HEADERS, timeout=30, follow_redirects=True) as client:
             for url in SEARCH_URLS:

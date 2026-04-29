@@ -1,17 +1,14 @@
 import asyncio
-from typing import Callable
 
 from scrapers.base import RawJob
 from scrapers.crowdworks import CrowdworksScraper
 from scrapers.lancers import LancersScraper
 from scrapers.coconala import CoconalaScraper
-from scrapers.bizseek import BizseekScraper
 
 ALL_SCRAPERS = [
     CrowdworksScraper,
     LancersScraper,
     CoconalaScraper,
-    BizseekScraper,
 ]
 
 

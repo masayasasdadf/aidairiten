@@ -4,6 +4,7 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 
+from config import settings
 from scrapers.base import BaseScraper, RawJob
 
 SEARCH_URLS = [
@@ -23,6 +24,10 @@ class LancersScraper(BaseScraper):
     platform_name = "lancers"
 
     async def fetch_jobs(self) -> list[RawJob]:
+        if not settings.lancers_email or not settings.lancers_password:
+            print("[Lancers] 認証情報未設定のためスキップ")
+            return []
+
         jobs = []
         async with httpx.AsyncClient(headers=HEADERS, timeout=30, follow_redirects=True) as client:
             for url in SEARCH_URLS:

@@ -1,13 +1,15 @@
 import re
 import asyncio
-from datetime import datetime
 from typing import Optional
 
-import httpx
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
+from config import settings
 from scrapers.base import BaseScraper, RawJob
 
+LOGIN_URL = "https://crowdworks.jp/login"
+
+# ログイン後にアクセスする検索ページ
 SEARCH_URLS = [
     "https://crowdworks.jp/public/jobs/search?job_type=writing&order=new",
     "https://crowdworks.jp/public/jobs/search?job_type=web_creation&order=new",
@@ -15,66 +17,127 @@ SEARCH_URLS = [
     "https://crowdworks.jp/public/jobs/search?job_type=data_entry&order=new",
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept-Language": "ja,en;q=0.9",
-}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 class CrowdworksScraper(BaseScraper):
     platform_name = "crowdworks"
 
     async def fetch_jobs(self) -> list[RawJob]:
-        jobs = []
-        async with httpx.AsyncClient(headers=HEADERS, timeout=30, follow_redirects=True) as client:
-            for url in SEARCH_URLS:
-                try:
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-                    jobs.extend(self._parse_list(resp.text, url))
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    print(f"[CrowdWorks] fetch error {url}: {e}")
-        return jobs
+        if not settings.crowdworks_email or not settings.crowdworks_password:
+            print("[CrowdWorks] 認証情報未設定のためスキップ")
+            return []
 
-    def _parse_list(self, html: str, base_url: str) -> list[RawJob]:
-        soup = BeautifulSoup(html, "lxml")
-        results = []
-
-        for item in soup.select("li.job_offer__item, article.job-item"):
+        jobs: list[RawJob] = []
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
+            page = await context.new_page()
             try:
-                title_el = item.select_one("h3 a, .job-item__title a")
-                if not title_el:
-                    continue
+                logged_in = await self._login(page)
+                if not logged_in:
+                    return []
 
-                title = title_el.get_text(strip=True)
-                href = title_el.get("href", "")
-                if not href.startswith("http"):
-                    href = "https://crowdworks.jp" + href
+                for url in SEARCH_URLS:
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                        items = await self._parse_list(page)
+                        print(f"[CrowdWorks] {url} → {len(items)}件")
+                        jobs.extend(items)
+                        await asyncio.sleep(2)
+                    except PlaywrightTimeout:
+                        print(f"[CrowdWorks] timeout {url}")
+                    except Exception as e:
+                        print(f"[CrowdWorks] fetch error {url}: {e}")
+            finally:
+                await context.close()
+                await browser.close()
 
-                job_id = re.search(r"/jobs/(\d+)", href)
-                external_id = f"cw_{job_id.group(1)}" if job_id else f"cw_{hash(href)}"
+        # 重複排除（複数カテゴリで同じ案件が出ることがある）
+        dedup: dict[str, RawJob] = {}
+        for j in jobs:
+            dedup[j.external_id] = j
+        return list(dedup.values())
 
-                desc_el = item.select_one(".job_offer__description, .job-item__description")
-                description = desc_el.get_text(strip=True) if desc_el else ""
+    async def _login(self, page: Page) -> bool:
+        try:
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+            # ログインフォームのセレクタ候補（DOM変更に備えて複数試行）
+            email_sel = 'input[name="username"], input[type="email"], input#username, input[name="email"]'
+            pass_sel = 'input[name="password"], input[type="password"], input#password'
+            submit_sel = 'button[type="submit"], input[type="submit"]'
 
-                price_el = item.select_one(".job_offer__price, .job-item__price")
-                price_text = price_el.get_text(strip=True) if price_el else ""
-                price = self._parse_price(price_text)
+            await page.wait_for_selector(email_sel, timeout=10000)
+            await page.fill(email_sel, settings.crowdworks_email)
+            await page.fill(pass_sel, settings.crowdworks_password)
+            await page.click(submit_sel)
+            await page.wait_for_load_state("networkidle", timeout=20000)
 
-                client_el = item.select_one(".job_offer__client, .job-item__client")
-                client_name = client_el.get_text(strip=True) if client_el else ""
+            # ログイン成否判定: URL に /login が残ってたら失敗
+            if "/login" in page.url:
+                print(f"[CrowdWorks] ログイン失敗: 認証情報が無効またはCAPTCHA要求 (URL={page.url})")
+                return False
 
-                results.append(RawJob(
+            print(f"[CrowdWorks] ログイン成功 (URL={page.url})")
+            return True
+        except PlaywrightTimeout:
+            print(f"[CrowdWorks] ログインタイムアウト (URL={page.url})")
+            return False
+        except Exception as e:
+            print(f"[CrowdWorks] ログイン例外: {e}")
+            return False
+
+    async def _parse_list(self, page: Page) -> list[RawJob]:
+        # JS で全リンクを走査して案件 ID 単位にユニーク化、カードのテキストも吸い出す
+        items = await page.evaluate(
+            """
+            () => {
+                const out = [];
+                const seen = new Set();
+                document.querySelectorAll('a[href*="/public/jobs/"]').forEach(a => {
+                    const m = a.href.match(/\\/public\\/jobs\\/(\\d+)/);
+                    if (!m) return;
+                    const id = m[1];
+                    if (seen.has(id)) return;
+                    const title = (a.textContent || '').trim();
+                    if (!title) return;
+                    seen.add(id);
+                    let card = a.closest('li, article');
+                    if (!card) card = a.parentElement;
+                    const cardText = card ? (card.textContent || '').trim() : '';
+                    out.push({ id, url: a.href, title, cardText });
+                });
+                return out;
+            }
+            """
+        )
+
+        results: list[RawJob] = []
+        for it in items:
+            card_text: str = it.get("cardText", "")
+            title: str = it.get("title", "")
+            description = card_text.replace(title, "").strip()[:500]
+            price = self._extract_price(card_text)
+            results.append(
+                RawJob(
                     platform=self.platform_name,
-                    external_id=external_id,
-                    url=href,
+                    external_id=f"cw_{it['id']}",
+                    url=it["url"],
                     title=title,
                     description=description,
                     price_fixed=price,
-                    client_name=client_name,
-                ))
-            except Exception:
-                continue
-
+                )
+            )
         return results
+
+    def _extract_price(self, text: str) -> Optional[int]:
+        # "10,000円" のような最初に出る金額表記を拾う
+        m = re.search(r"([\d,]+)\s*円", text)
+        if not m:
+            return None
+        digits = m.group(1).replace(",", "")
+        return int(digits) if digits.isdigit() else None
