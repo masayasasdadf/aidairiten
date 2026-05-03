@@ -132,10 +132,28 @@ def _tools_for(thread: str) -> list[dict]:
             "parameters": {"type": "object", "properties": {}},
         },
     }
+    inbox_tool = {
+        "type": "function",
+        "function": {
+            "name": "check_inbox",
+            "description": (
+                "応募済み案件の受信箱を巡回し、クライアントからの新着メッセージを取得する。"
+                "auto_reply=True なら新着に対して LLM が返信文を起案し即座に送信する。"
+                "False なら DB に取り込んで人間確認を待つ (デフォルト False)。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "auto_reply": {"type": "boolean", "description": "自動返信を有効化するか"},
+                },
+                "required": [],
+            },
+        },
+    }
 
     if thread == "ceo":
-        return [pause_tool, resume_tool, cycle_tool, add_directive_tool, release_directive_tool]
-    # 部門マネージャは自部署への指示のみ。pause/resume/巡回 は不可
+        return [pause_tool, resume_tool, cycle_tool, inbox_tool, add_directive_tool, release_directive_tool]
+    # 部門マネージャは自部署への指示のみ
     return [add_directive_tool]
 
 
@@ -194,6 +212,15 @@ def _exec_tool(name: str, args: dict, thread: str) -> dict:
         log_event("system", "巡回開始指示", "chat経由", level="success")
         _asyncio.create_task(run_pipeline())
         return {"ok": True, "started": True}
+
+    if name == "check_inbox":
+        import asyncio as _asyncio
+        from pipeline import check_messages_and_reply
+
+        auto = bool(args.get("auto_reply", False))
+        log_event("system", "受信箱チェック起動", f"chat経由 auto_reply={auto}", level="success")
+        _asyncio.create_task(check_messages_and_reply(auto_reply=auto))
+        return {"ok": True, "started": True, "auto_reply": auto}
 
     if name == "release_directive":
         did = int(args.get("directive_id", 0))

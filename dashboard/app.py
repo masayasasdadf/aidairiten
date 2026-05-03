@@ -12,9 +12,9 @@ from agents.chat_agent import chat as chat_agent_run, fetch_history, PERSONAS as
 from db.control import get_state as get_control_state, pause as pause_ops, resume as resume_ops
 from db.credentials import all_credentials_masked, set_credential, CREDENTIAL_KEYS
 from db.database import get_db, init_db
-from db.models import Job, Deliverable, Directive, JobStatus
+from db.models import Job, Deliverable, Directive, JobStatus, Application, Message
 from dashboard.events import get_events, log_event
-from pipeline import run_pipeline, go_job, skip_job, cycle_state
+from pipeline import run_pipeline, go_job, skip_job, cycle_state, check_messages_and_reply
 
 
 _VALID_TARGETS = {"all", "analysis", "execution", "qc"}
@@ -200,8 +200,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>AI総合商社 ダッシュボード</h1>
-  <div style="display:flex;align-items:center;gap:12px">
-    <button id="cycle-btn" onclick="startCycle()" style="background:#7c8cf8;border:none;color:white;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:600">🔍 巡回開始</button>
+  <div style="display:flex;align-items:center;gap:8px">
+    <button id="cycle-btn" onclick="startCycle()" style="background:#7c8cf8;border:none;color:white;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600">🔍 巡回開始</button>
+    <button id="inbox-btn" onclick="checkInbox(false)" style="background:#475569;border:none;color:white;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600">📬 受信箱</button>
+    <button id="inbox-auto-btn" onclick="checkInbox(true)" style="background:#7c3aed;border:none;color:white;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600" title="LLM が自動で返信文を作って送信します">📬⚡ 自動返信</button>
     <div class="clock" id="clock">--:--:--</div>
   </div>
 </header>
@@ -285,6 +287,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 const STATUS_LABELS = {
   new: ['新着', 'badge-new'], analyzing: ['分析中', 'badge-new'],
   reported: ['🔔 上申(GO待ち)', 'badge-qc'],
+  applying: ['📝 応募準備中', 'badge-new'],
+  applied: ['📤 応募済み(返信待ち)', 'badge-inhouse'],
+  replied: ['💬 返信あり', 'badge-qc'],
+  won: ['🎉 受注確定', 'badge-approved'],
+  lost: ['不採用', 'badge-skip'],
   inhouse: ['制作キュー', 'badge-inhouse'], outsource: ['外注待ち', 'badge-outsource'],
   skipped: ['見送り', 'badge-skip'], in_progress: ['生産中', 'badge-inhouse'],
   qc: ['QC中', 'badge-qc'], pending_approval: ['承認待ち', 'badge-qc'],
@@ -385,12 +392,16 @@ async function loadJobs() {
         j.price_min ? `¥${j.price_min.toLocaleString()}〜` : '不明';
       let actions = '';
       if (j.status === 'reported') {
-        const goLabel = j.execution_type === 'outsource' ? 'GO(外注)' : 'GO(受注)';
-        actions = `<button class="btn btn-approve" onclick="goJob(${j.id})">${goLabel}</button>
+        actions = `<button class="btn btn-approve" onclick="goJob(${j.id})">📝 GO(応募)</button>
                    <button class="btn btn-reject" onclick="skipJob(${j.id})">見送る</button>`;
+      } else if (j.status === 'applied' || j.status === 'replied') {
+        actions = `<button class="btn" style="background:#475569;color:white" onclick="showApplication(${j.id})">応募文</button>
+                   <button class="btn" style="background:#475569;color:white" onclick="showMessages(${j.id})">メッセージ</button>`;
       } else if (j.status === 'pending_approval') {
         actions = `<button class="btn btn-approve" onclick="approve(${j.id})">承認</button>
                    <button class="btn btn-reject" onclick="reject(${j.id})">却下</button>`;
+      } else if (j.status === 'applying') {
+        actions = '<span style="color:#888;font-size:0.75rem">準備中…</span>';
       }
       return `<tr>
         <td><a href="${j.url}" target="_blank">${escapeHtml(j.title.slice(0,40))}${j.title.length>40?'…':''}</a></td>
@@ -415,6 +426,46 @@ async function approve(id) { await fetch(`/api/jobs/${id}/approve`, {method:'POS
 async function reject(id)  { await fetch(`/api/jobs/${id}/reject`,  {method:'POST'}); refreshAll(); }
 async function goJob(id)   { await fetch(`/api/jobs/${id}/go`,      {method:'POST'}); refreshAll(); }
 async function skipJob(id) { await fetch(`/api/jobs/${id}/skip`,    {method:'POST'}); refreshAll(); }
+
+async function checkInbox(autoReply) {
+  const url = '/api/messages/check' + (autoReply ? '?auto_reply=true' : '');
+  const btn = document.getElementById(autoReply ? 'inbox-auto-btn' : 'inbox-btn');
+  btn.disabled = true;
+  try {
+    await fetch(url, {method:'POST'});
+    loadActivity();
+    setTimeout(refreshAll, 30000);
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 3000);
+  }
+}
+
+async function showApplication(jobId) {
+  try {
+    const r = await fetch(`/api/jobs/${jobId}/application`);
+    if (!r.ok) { alert('応募文がまだありません'); return; }
+    const a = await r.json();
+    const text = `【応募文】\n\n${a.proposal_text}\n\n` +
+                 `提案金額: ${a.proposed_amount ? '¥'+a.proposed_amount.toLocaleString() : '未設定'}\n` +
+                 `提案納期: ${a.proposed_days ? a.proposed_days+'日' : '未設定'}\n` +
+                 `送信済み: ${a.submitted ? 'はい ('+(a.submitted_at||'')+')' : 'いいえ'}` +
+                 (a.error ? `\n\n⚠️ エラー: ${a.error}` : '');
+    alert(text);
+  } catch (e) { console.warn('application', e); }
+}
+
+async function showMessages(jobId) {
+  try {
+    const r = await fetch(`/api/jobs/${jobId}/messages`);
+    const msgs = await r.json();
+    if (!msgs.length) { alert('メッセージはまだありません'); return; }
+    const text = msgs.map(m => {
+      const who = m.sender === 'client' ? 'クライアント' : '自社';
+      return `[${(m.sent_at||'').slice(0,16).replace('T',' ')}] ${who}\n${m.content}`;
+    }).join('\n\n---\n\n');
+    alert(text);
+  } catch (e) { console.warn('messages', e); }
+}
 
 async function startCycle() {
   const btn = document.getElementById('cycle-btn');
@@ -677,20 +728,15 @@ setInterval(() => { document.getElementById('clock').textContent = new Date().to
 
 @app.get("/api/stats")
 async def get_stats(db: Session = Depends(get_db)):
-    total = db.query(Job).count()
-    reported = db.query(Job).filter(Job.status == JobStatus.REPORTED).count()
-    in_progress = db.query(Job).filter(Job.status == JobStatus.IN_PROGRESS).count()
-    qc = db.query(Job).filter(Job.status == JobStatus.QC).count()
-    pending = db.query(Job).filter(Job.status == JobStatus.PENDING_APPROVAL).count()
-    approved = db.query(Job).filter(Job.status == JobStatus.APPROVED).count()
-    skipped = db.query(Job).filter(Job.status == JobStatus.SKIPPED).count()
+    def cnt(*statuses):
+        return db.query(Job).filter(Job.status.in_(statuses)).count()
     return {
-        "総案件数": total,
-        "上申待ち(GO待ち)": reported,
-        "生産中": in_progress + qc,
-        "承認待ち": pending,
-        "承認済み": approved,
-        "見送り": skipped,
+        "総案件数": db.query(Job).count(),
+        "上申待ち": cnt(JobStatus.REPORTED),
+        "応募中": cnt(JobStatus.APPLYING, JobStatus.APPLIED),
+        "返信あり": cnt(JobStatus.REPLIED),
+        "受注確定": cnt(JobStatus.WON),
+        "見送り/不採用": cnt(JobStatus.SKIPPED, JobStatus.LOST),
     }
 
 
@@ -833,6 +879,59 @@ async def post_credential(payload: CredentialIn):
         level="success",
     )
     return {"ok": True}
+
+
+@app.post("/api/messages/check")
+async def post_check_messages(auto_reply: bool = False):
+    """受信箱を巡回 → 新着取り込み → (auto_reply=True なら自動返信)。
+
+    バックグラウンド実行。結果は活動ログ + /api/jobs/{id}/messages で確認。
+    """
+
+    asyncio.create_task(check_messages_and_reply(auto_reply=auto_reply))
+    log_event("sales", "受信箱チェック起動", f"auto_reply={auto_reply}", level="success")
+    return {"ok": True, "scheduled": True}
+
+
+@app.get("/api/jobs/{job_id}/application")
+async def get_job_application(job_id: int, db: Session = Depends(get_db)):
+    a = (
+        db.query(Application)
+        .filter(Application.job_id == job_id)
+        .order_by(Application.id.desc())
+        .first()
+    )
+    if not a:
+        raise HTTPException(status_code=404, detail="未起案")
+    return {
+        "id": a.id,
+        "proposal_text": a.proposal_text,
+        "proposed_amount": a.proposed_amount,
+        "proposed_days": a.proposed_days,
+        "submitted": a.submitted,
+        "submitted_at": a.submitted_at.isoformat() + "Z" if a.submitted_at else None,
+        "error": a.error,
+    }
+
+
+@app.get("/api/jobs/{job_id}/messages")
+async def get_job_messages(job_id: int, db: Session = Depends(get_db)):
+    rows = (
+        db.query(Message)
+        .filter(Message.job_id == job_id)
+        .order_by(Message.sent_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "sender": r.sender,
+            "content": r.content,
+            "sent_at": r.sent_at.isoformat() + "Z" if r.sent_at else None,
+            "handled": r.handled,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/chat/{thread}")

@@ -265,11 +265,11 @@ async def run_pipeline() -> dict:
 
 
 async def go_job(job_id: int) -> dict:
-    """ユーザーの GO サイン。REPORTED な inhouse 案件を execute → QC まで進める。
+    """ユーザーの GO サイン → 営業マンが応募文起案 → CW 自動応募。"""
 
-    outsource 案件はそのまま OUTSOURCE 状態（発注先待ち）に遷移するのみで、
-    LLM での生産はしない。
-    """
+    from agents.application_agent import draft_application
+    from clients.crowdworks_ops import CrowdworksOps
+    from db.models import Application
 
     db = SessionLocal()
     try:
@@ -279,30 +279,238 @@ async def go_job(job_id: int) -> dict:
         if job.status != JobStatus.REPORTED:
             return {"ok": False, "error": f"GO できる状態ではありません (現在: {job.status.value})"}
 
-        if job.execution_type == ExecutionType.OUTSOURCE:
-            job.status = JobStatus.OUTSOURCE
-            db.commit()
-            log_event(
-                "pipeline",
-                "GOサイン受領 (外注)",
-                f"'{job.title[:30]}' → 外注待ち",
-                job_id=job.id,
-                level="success",
-            )
-            return {"ok": True, "next": "outsource"}
-
-        # inhouse 推奨 (またはタイプ未設定) は execute へ
         log_event(
-            "pipeline",
-            "GOサイン受領",
-            f"'{job.title[:30]}' → 制作開始",
+            "sales",
+            "GOサイン受領 → 応募準備",
+            f"'{job.title[:30]}'",
             job_id=job.id,
             level="success",
         )
-        await _execute(db, job)
-        return {"ok": True, "next": "inhouse_executed"}
+
+        # 1. APPLYING に遷移して応募文起案
+        job.status = JobStatus.APPLYING
+        db.commit()
+        log_event("sales", "応募文起案", f"'{job.title[:30]}'", job_id=job.id)
+
+        try:
+            draft = await draft_application(job)
+        except Exception as e:
+            job.status = JobStatus.REPORTED  # 失敗時は元に戻す
+            db.commit()
+            log_event("sales", "応募文起案失敗", f"{e}", job_id=job.id, level="error")
+            return {"ok": False, "error": f"起案失敗: {e}"}
+
+        # Application レコード作成
+        app_row = Application(
+            job_id=job.id,
+            proposal_text=draft["proposal_text"],
+            proposed_amount=draft.get("proposed_amount"),
+            proposed_days=draft.get("proposed_days"),
+            submitted=False,
+        )
+        db.add(app_row)
+        db.commit()
+        db.refresh(app_row)
+        log_event(
+            "sales",
+            "応募文できた",
+            f"{len(draft['proposal_text'])}字 / 提案額 {draft.get('proposed_amount')}円 / {draft.get('proposed_days')}日",
+            job_id=job.id,
+            level="success",
+        )
+
+        # 2. CrowdWorks に送信 (URL は job.url 前提)
+        if not job.url or "crowdworks.jp" not in job.url:
+            log_event(
+                "sales",
+                "送信スキップ",
+                "CrowdWorks以外のプラットフォームは未対応",
+                job_id=job.id,
+                level="warn",
+            )
+            return {"ok": True, "submitted": False, "application_id": app_row.id}
+
+        log_event("sales", "応募送信開始", job.url, job_id=job.id)
+        async with CrowdworksOps() as ops:
+            result = await ops.submit_application(
+                job_url=job.url,
+                proposal_text=draft["proposal_text"],
+                proposed_amount=draft.get("proposed_amount"),
+                proposed_days=draft.get("proposed_days"),
+            )
+
+        # 結果反映
+        db = SessionLocal()
+        try:
+            app_row = db.query(Application).filter(Application.id == app_row.id).first()
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if result.get("ok"):
+                app_row.submitted = True
+                app_row.submitted_at = datetime.utcnow()
+                job.status = JobStatus.APPLIED
+                db.commit()
+                log_event(
+                    "sales",
+                    "応募完了",
+                    f"'{job.title[:30]}' → クライアント返信待ち",
+                    job_id=job.id,
+                    level="success",
+                )
+                return {"ok": True, "submitted": True, "application_id": app_row.id}
+            else:
+                app_row.error = result.get("error", "")
+                job.status = JobStatus.REPORTED  # 戻す（再試行可能に）
+                db.commit()
+                log_event(
+                    "sales",
+                    "応募失敗",
+                    result.get("error", ""),
+                    job_id=job.id,
+                    level="error",
+                )
+                return {"ok": False, "submitted": False, "error": result.get("error", "")}
+        finally:
+            db.close()
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+async def check_messages_and_reply(auto_reply: bool = False) -> dict:
+    """全 APPLIED/REPLIED な案件のメッセージを巡回し、新着を取り込む。
+
+    auto_reply=True なら LLM で返信文を生成し即送信する。
+    False なら DB に新着を保存して REPLIED 状態にするだけ (人間確認待ち)。
+    """
+
+    from agents.reply_agent import draft_reply
+    from clients.crowdworks_ops import CrowdworksOps
+    from db.models import Message
+
+    log_event("sales", "受信箱巡回開始", f"auto_reply={auto_reply}")
+
+    new_count = 0
+    replied_count = 0
+
+    async with CrowdworksOps() as ops:
+        threads = await ops.fetch_inbox_threads()
+        if not threads:
+            log_event("sales", "受信箱巡回完了", "スレッドなし or ログイン失敗")
+            return {"ok": True, "threads": 0, "new_messages": 0, "replies_sent": 0}
+
+        # 各スレッドを既存 Job と紐付ける必要があるが、現状の Application/Job には
+        # CW スレッドIDが保存されていない。MVP では「APPLIED 状態の Job」だけを
+        # 対象にし、スレッドの snippet にタイトルが含まれているもので fuzzy 紐付け。
+        db = SessionLocal()
+        try:
+            applied_jobs = (
+                db.query(Job)
+                .filter(Job.status.in_([JobStatus.APPLIED, JobStatus.REPLIED]))
+                .all()
+            )
+            applied_index = [(j, j.title or "") for j in applied_jobs]
+        finally:
+            db.close()
+
+        for th in threads:
+            snippet = th.get("snippet", "")
+            matched_job = None
+            for j, title in applied_index:
+                if title and title[:15] in snippet:
+                    matched_job = j
+                    break
+            if not matched_job:
+                continue
+
+            msgs = await ops.fetch_thread_messages(th["url"])
+            if not msgs:
+                continue
+
+            # 新着判定 + 保存
+            db = SessionLocal()
+            try:
+                existing_ids = {
+                    r.external_id
+                    for r in db.query(Message).filter(Message.job_id == matched_job.id).all()
+                }
+                fresh_client_msgs = []
+                for m in msgs:
+                    ext_id = f"cw_{th['thread_id']}_{m['ext_id']}"
+                    if ext_id in existing_ids:
+                        continue
+                    db.add(Message(
+                        job_id=matched_job.id,
+                        sender=m["sender"],
+                        content=m["content"],
+                        external_id=ext_id,
+                    ))
+                    if m["sender"] == "client":
+                        fresh_client_msgs.append(m)
+                        new_count += 1
+                if fresh_client_msgs:
+                    job = db.query(Job).filter(Job.id == matched_job.id).first()
+                    job.status = JobStatus.REPLIED
+                db.commit()
+
+                if fresh_client_msgs:
+                    log_event(
+                        "sales",
+                        "新着メッセージ",
+                        f"'{matched_job.title[:30]}' から {len(fresh_client_msgs)} 件",
+                        job_id=matched_job.id,
+                        level="success",
+                    )
+            finally:
+                db.close()
+
+            # auto_reply
+            if auto_reply and fresh_client_msgs:
+                db = SessionLocal()
+                try:
+                    job = db.query(Job).filter(Job.id == matched_job.id).first()
+                    history = (
+                        db.query(Message)
+                        .filter(Message.job_id == matched_job.id)
+                        .order_by(Message.sent_at.asc())
+                        .all()
+                    )
+                finally:
+                    db.close()
+
+                try:
+                    reply_text = await draft_reply(job, history)
+                except Exception as e:
+                    log_event("sales", "返信起案失敗", str(e), job_id=matched_job.id, level="error")
+                    continue
+
+                send_result = await ops.send_reply(th["url"], reply_text)
+                if send_result.get("ok"):
+                    replied_count += 1
+                    db = SessionLocal()
+                    try:
+                        db.add(Message(
+                            job_id=matched_job.id,
+                            sender="us",
+                            content=reply_text,
+                        ))
+                        # 取り込んだ新着を handled に
+                        for r in db.query(Message).filter(
+                            Message.job_id == matched_job.id, Message.sender == "client"
+                        ).all():
+                            r.handled = True
+                        db.commit()
+                    finally:
+                        db.close()
+
+    log_event(
+        "sales",
+        "受信箱巡回完了",
+        f"新着 {new_count} 件 / 自動返信 {replied_count} 件",
+        level="success",
+    )
+    return {"ok": True, "new_messages": new_count, "replies_sent": replied_count}
 
 
 def skip_job(job_id: int) -> dict:

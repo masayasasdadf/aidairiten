@@ -20,7 +20,12 @@ class JobStatus(str, enum.Enum):
     NEW = "new"                  # 新着・未処理
     ANALYZING = "analyzing"      # 分析中
     REPORTED = "reported"        # 営業部上申中（ユーザーのGO待ち）
-    INHOUSE = "inhouse"          # 自社AI処理予定（GO後）
+    APPLYING = "applying"        # 応募文起案・送信中
+    APPLIED = "applied"          # 応募送信済み（クライアント返信待ち）
+    REPLIED = "replied"          # クライアントから返信あり、やり取り中
+    WON = "won"                  # 受注確定 → 制作開始可
+    LOST = "lost"                # 返信なし / 不採用
+    INHOUSE = "inhouse"          # (旧) 自社AI処理予定
     OUTSOURCE = "outsource"      # 外注予定（発注先待ち）
     SKIPPED = "skipped"          # スキップ
     IN_PROGRESS = "in_progress"  # 生産中
@@ -133,6 +138,36 @@ class EventLog(Base):
     job_id = Column(Integer, nullable=True, index=True)
     level = Column(String(20), nullable=False, default="info")
     ts = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Application(Base):
+    """応募記録: 1件の job に対して 1つ作成される (再応募は版数を上げる)。"""
+
+    __tablename__ = "applications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False, index=True)
+    proposal_text = Column(Text, nullable=False)
+    proposed_amount = Column(Integer, nullable=True)        # 提案金額(円)
+    proposed_days = Column(Integer, nullable=True)          # 提案納期(日)
+    submitted = Column(Boolean, default=False, nullable=False)
+    submitted_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)                     # 送信失敗時の理由
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Message(Base):
+    """クライアントとのやり取り 1通分。"""
+
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False, index=True)
+    sender = Column(String(20), nullable=False)             # 'client' / 'us'
+    content = Column(Text, nullable=False)
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    external_id = Column(String(200), nullable=True, unique=True)  # CW側のメッセージID重複防止
+    handled = Column(Boolean, default=False, nullable=False)       # AI返信済みフラグ
 
 
 class Deliverable(Base):
